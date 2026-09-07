@@ -343,6 +343,7 @@ test.describe('robustness', () => {
       return { ms: performance.now() - t0, found: !!r };
     });
     expect(ok.ms).toBeLessThan(8000);
+    expect(ok.found).toBe(true); // 축소 후에도 큰 흰 사각형을 검출해야 한다
   });
 
   test('파일 선택 경로는 여전히 adjust 까지 도달한다 (revokeObjectURL 이 깨뜨리지 않음)', async ({ page }) => {
@@ -437,5 +438,109 @@ test.describe('export', () => {
     await page.click('#exp-list .exp-item:first-child [data-filter="bw"]');
     const f = await page.evaluate(() => window.scanDebug.state.pages[0].filter);
     expect(f).toBe('bw');
+  });
+});
+
+test.describe('회귀 (C1/C2/I6)', () => {
+  test('C1: detectCorners 를 1000회 반복해도 WASM 힙이 늘지 않는다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const r = await page.evaluate(() => {
+      const cv = window.cv;
+      const heap = () => {
+        if (cv.HEAP8 && cv.HEAP8.buffer) return cv.HEAP8.buffer.byteLength;
+        if (typeof cv.wasmMemory !== 'undefined' && cv.wasmMemory.buffer) return cv.wasmMemory.buffer.byteLength;
+        if (performance.memory) return performance.memory.usedJSHeapSize;
+        return null;
+      };
+      const c = document.createElement('canvas'); c.width = 640; c.height = 480;
+      const x = c.getContext('2d');
+      x.fillStyle = '#777'; x.fillRect(0, 0, 640, 480);
+      const im = x.getImageData(0, 0, 640, 480);
+      for (let i = 0; i < im.data.length; i += 4) {
+        const n = (Math.random() * 90) | 0;
+        im.data[i] = 90 + n; im.data[i + 1] = 90 + n; im.data[i + 2] = 90 + n;
+      }
+      x.putImageData(im, 0, 0);
+      x.fillStyle = '#efefef'; x.fillRect(110, 80, 420, 320); // 종이 비슷한 밝은 사각형
+      for (let i = 0; i < 60; i++) window.scanDebug.detectCorners(c); // 워밍업
+      const before = heap();
+      for (let i = 0; i < 1000; i++) window.scanDebug.detectCorners(c);
+      const after = heap();
+      return { before, after, mode: (cv.HEAP8 ? 'HEAP8' : cv.wasmMemory ? 'wasmMemory' : 'jsHeap') };
+    });
+    expect(r.before).not.toBeNull();
+    // WASM 메모리는 한 번 커지면 줄지 않는다 — 누수가 있으면 1000회 동안 반드시 증가.
+    expect(r.after).toBe(r.before);
+  });
+
+  test('C2: auto 필터가 2000x1500 에서 800ms 이내로 끝나고 색을 유지한다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const r = await page.evaluate(() => {
+      const c = document.createElement('canvas'); c.width = 2000; c.height = 1500;
+      const x = c.getContext('2d');
+      const g = x.createLinearGradient(0, 0, 2000, 1500); // 조명 기울기(그림자)
+      g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#7a7a7a');
+      x.fillStyle = g; x.fillRect(0, 0, 2000, 1500);
+      x.fillStyle = '#c62828'; x.fillRect(200, 200, 600, 400);   // 빨강 블록
+      x.fillStyle = '#1565c0'; x.fillRect(1050, 800, 700, 500);  // 파랑 블록
+      window.scanDebug.filters.applyFilter(c, 'auto'); // 워밍업(WASM JIT 1회 비용 제외)
+      const t0 = performance.now();
+      const out = window.scanDebug.filters.applyFilter(c, 'auto');
+      const ms = performance.now() - t0;
+      const d = out.getContext('2d').getImageData(0, 0, 2000, 1500).data;
+      const at = (px, py) => { const i = (py * 2000 + px) * 4; return [d[i], d[i + 1], d[i + 2]]; };
+      const red = at(500, 400), blue = at(1400, 1050);
+      const colorful =
+        (red[0] - red[2] > 25) && (blue[2] - blue[0] > 25); // 빨강은 R>B, 파랑은 B>R
+      return { ms, colorful, red, blue };
+    });
+    expect(r.ms).toBeLessThan(800);
+    expect(r.colorful).toBe(true);
+  });
+
+  test('I6: 담긴 페이지를 다시 보정하면 warpedCanvas 가 갱신되고 export 로 돌아온다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.evaluate(() => { document.getElementById('cam-file').value = ''; });
+    await page.setInputFiles('#cam-file', 'tests/fixtures/paper-on-desk.jpg');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#adj-handles .handle').length === 4, null, { timeout: 5000 });
+    await page.evaluate(async () => {
+      const truth = await (await fetch('/tests/fixtures/paper-on-desk.json')).json();
+      window.scanDebug._setHandles(truth.corners);
+    });
+    await page.click('#adj-accept');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'camera', null, { timeout: 10000 });
+    await page.evaluate(() => window.scanDebug.show('export'));
+    const before = await page.evaluate(() => {
+      const p = window.scanDebug.state.pages[0];
+      return { id: p.id, dim: p.warpedCanvas.width + 'x' + p.warpedCanvas.height };
+    });
+    await page.click('#exp-list .exp-item:first-child [data-act=edit]');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+    await page.waitForFunction(() => window.scanDebug.state.editingPageId !== null, null, { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelectorAll('#adj-handles .handle').length === 4, null, { timeout: 5000 });
+    await page.evaluate(() => {
+      window.scanDebug._setHandles({
+        topLeft: { x: 300, y: 300 }, topRight: { x: 900, y: 300 },
+        bottomRight: { x: 900, y: 1200 }, bottomLeft: { x: 300, y: 1200 },
+      });
+    });
+    await page.click('#adj-accept');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'export', null, { timeout: 10000 });
+    const after = await page.evaluate(() => {
+      const p = window.scanDebug.state.pages[0];
+      return {
+        id: p.id, dim: p.warpedCanvas.width + 'x' + p.warpedCanvas.height,
+        editingPageId: window.scanDebug.state.editingPageId,
+        n: window.scanDebug.state.pages.length,
+      };
+    });
+    expect(after.editingPageId).toBeNull();
+    expect(after.n).toBe(1);
+    expect(after.id).toBe(before.id);
+    expect(after.dim).not.toBe(before.dim);
   });
 });
