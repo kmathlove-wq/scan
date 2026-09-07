@@ -136,6 +136,16 @@ function wireEvents() {
 }
 
 /* ===== util ===== */
+// cv.Mat 자동 해제 헬퍼. fn(track) 안에서 track(mat) 으로 등록한 모든 Mat/MatVector 를
+// finally 에서 delete() 한다. cv.add / cv.merge 등에 인라인으로 넘기는 임시 Mat 도
+// 반드시 track 을 거쳐야 누수가 없다.
+function withMats(fn) {
+  const bag = [];
+  const track = (m) => { bag.push(m); return m; };
+  try { return fn(track); }
+  finally { for (const m of bag) { try { m.delete(); } catch (e) {} } }
+}
+
 function showToast(msg, ms = 2200) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
@@ -577,6 +587,101 @@ async function acceptAdjust(corners) {
   show('camera');
 }
 
+/* ===== filters ===== */
+// warpedCanvas → filteredCanvas. 모든 cv.Mat 은 withMats 의 track 으로 등록해
+// 예외 여부와 무관하게 해제한다. applyFilter 는 입력과 같은 크기의 새 캔버스를 돌려주고,
+// 어떤 예외가 나도 원본 복사본 + console.warn 으로 안전하게 떨어진다.
+
+function _canvasOut(mat, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  cv.imshow(c, mat);
+  return c;
+}
+
+function _plainCopy(canvas) {
+  const c = document.createElement('canvas');
+  c.width = canvas.width; c.height = canvas.height;
+  c.getContext('2d').drawImage(canvas, 0, 0);
+  return c;
+}
+
+// 회색: RGBA → GRAY → RGBA (R=G=B)
+function fGray(src, track) {
+  const g = track(new cv.Mat());
+  cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+  const out = track(new cv.Mat());
+  cv.cvtColor(g, out, cv.COLOR_GRAY2RGBA);
+  return out;
+}
+
+// 흑백: 적응형 임계값(글자 문서용)
+function fBw(src, track) {
+  const g = track(new cv.Mat());
+  cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+  const bin = track(new cv.Mat());
+  cv.adaptiveThreshold(g, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 15, 10);
+  const out = track(new cv.Mat());
+  cv.cvtColor(bin, out, cv.COLOR_GRAY2RGBA);
+  return out;
+}
+
+// 자동보정: 그림자·조명 얼룩 제거 + 살짝 선명화. 컬러 유지(spec §5).
+// 배경 밝기를 큰 커널 블러로 추정 → 원본 RGB 를 배경으로 나눠(평균 밝기로 재조정)
+// 조명 기울기를 평탄화한다. 3채널 전역 normalize 는 색이 틀어지므로 쓰지 않는다.
+function fAuto(src, track) {
+  const rgb = track(new cv.Mat());
+  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);                       // 8UC3
+  const gray = track(new cv.Mat());
+  cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);                      // 8UC1
+
+  let kk = Math.max(3, Math.round(src.cols / 8)); if (kk % 2 === 0) kk += 1;
+  const bg = track(new cv.Mat());
+  cv.GaussianBlur(gray, bg, new cv.Size(kk, kk), 0);              // 조명 추정
+  const bgF = track(new cv.Mat());
+  bg.convertTo(bgF, cv.CV_32F);
+  // 0 나눗셈 방지: 배경 + 1
+  const one = track(new cv.Mat(bgF.rows, bgF.cols, bgF.type(), new cv.Scalar(1)));
+  cv.add(bgF, one, bgF);
+  // 배경을 3채널로 확장
+  const mv = track(new cv.MatVector());
+  mv.push_back(bgF); mv.push_back(bgF); mv.push_back(bgF);
+  const bg3 = track(new cv.Mat());
+  cv.merge(mv, bg3);                                              // 32FC3
+
+  const rgbF = track(new cv.Mat());
+  rgb.convertTo(rgbF, cv.CV_32FC3);
+  const meanBg = cv.mean(bgF)[0];
+  const normF = track(new cv.Mat());
+  cv.divide(rgbF, bg3, normF, meanBg);                            // rgb/bg * meanBg
+  const norm8 = track(new cv.Mat());
+  normF.convertTo(norm8, cv.CV_8UC3);                             // 포화 변환(0~255)
+
+  // 약한 언샤프 마스크(또렷)
+  const blur = track(new cv.Mat());
+  cv.GaussianBlur(norm8, blur, new cv.Size(0, 0), 3);
+  const sharp = track(new cv.Mat());
+  cv.addWeighted(norm8, 1.3, blur, -0.3, 0, sharp);
+
+  const out = track(new cv.Mat());
+  cv.cvtColor(sharp, out, cv.COLOR_RGB2RGBA);
+  return out;
+}
+
+function applyFilter(canvas, name) {
+  if (name === 'original') return _plainCopy(canvas);
+  try {
+    return withMats((track) => {
+      const src = track(cv.imread(canvas));
+      const fn = name === 'gray' ? fGray : name === 'bw' ? fBw : fAuto;
+      const out = fn(src, track);
+      return _canvasOut(out, canvas.width, canvas.height);
+    });
+  } catch (e) {
+    console.warn('filter failed, fallback original', name, e);
+    return _plainCopy(canvas);
+  }
+}
+
 /* ===== cvloader ===== */
 // opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
 // 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
@@ -650,6 +755,7 @@ window.scanDebug = {
   startLiveLoop, stopLiveLoop, drawQuad, _liveRunning,
   openAdjust, readHandles, _setHandles,
   extractPaper, addPage, removePage, movePage, setFilter, acceptAdjust, PAGE_LIMIT,
+  filters: { applyFilter, withMats },
 };
 
 show('loading');

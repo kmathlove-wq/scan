@@ -12,3 +12,9 @@
 - (Task 8, 2026-09-07) jscanify 1.4.0 `extractPaper`는 내부 `srcTri/dstTri/M` Mat 3개를
   해제하지 않는다(큰 `img`/`warpedDst`는 해제함). 페이지당 1회 호출·초소형이라 방치했으나,
   루프에서 부르면 누수. cornerPoints 키는 `*Corner`(`topLeftCorner` 등).
+
+- (Task 9, 2026-09-07) OpenCV.js 4.9.0에서 `cv.MatVector` + `cv.merge` + `cv.mean`은
+  정상 동작 — 1채널 32F Mat 3개를 push_back 해 32FC3로 merge, `cv.divide(rgbF, bg3, out, scale)`로
+  조명 나눗셈이 잘 된다. 색 유지 자동보정(fAuto) 구현에 문제 없었다. `withMats`의
+  `m.delete()`는 Mat과 MatVector 모두에 통한다. `new cv.Size(...)`/`new cv.Scalar(...)`는
+  값 객체라 track/delete 불필요. (검증: filters 3개 + 색 유지 임시 테스트 통과.)

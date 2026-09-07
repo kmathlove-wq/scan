@@ -267,3 +267,52 @@ test.describe('warp + pages', () => {
     expect(left).toEqual([ids[1]]);
   });
 });
+
+test.describe('filters', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+  });
+
+  test('모든 필터는 크기를 보존하고 예외를 던지지 않는다', async ({ page }) => {
+    const res = await page.evaluate(() => {
+      const src = document.createElement('canvas'); src.width = 200; src.height = 260;
+      const ctx = src.getContext('2d');
+      const g = ctx.createLinearGradient(0, 0, 200, 260);
+      g.addColorStop(0, '#111'); g.addColorStop(1, '#eee');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, 200, 260);
+      return ['original', 'auto', 'bw', 'gray'].map(n => {
+        const out = window.scanDebug.filters.applyFilter(src, n);
+        return { n, w: out.width, h: out.height };
+      });
+    });
+    for (const r of res) { expect(r.w).toBe(200); expect(r.h).toBe(260); }
+  });
+
+  test('bw는 거의 흑백 2값', async ({ page }) => {
+    const ratio = await page.evaluate(() => {
+      const src = document.createElement('canvas'); src.width = 100; src.height = 100;
+      const ctx = src.getContext('2d');
+      const g = ctx.createLinearGradient(0, 0, 100, 0);
+      g.addColorStop(0, '#000'); g.addColorStop(1, '#fff');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, 100, 100);
+      const out = window.scanDebug.filters.applyFilter(src, 'bw');
+      const d = out.getContext('2d').getImageData(0, 0, 100, 100).data;
+      let extreme = 0, total = 0;
+      for (let i = 0; i < d.length; i += 4) { total++; if (d[i] < 30 || d[i] > 225) extreme++; }
+      return extreme / total;
+    });
+    expect(ratio).toBeGreaterThan(0.95);
+  });
+
+  test('gray는 R=G=B', async ({ page }) => {
+    const ok = await page.evaluate(() => {
+      const src = document.createElement('canvas'); src.width = 60; src.height = 60;
+      src.getContext('2d').fillStyle = '#c04030'; src.getContext('2d').fillRect(0, 0, 60, 60);
+      const d = window.scanDebug.filters.applyFilter(src, 'gray').getContext('2d').getImageData(0, 0, 60, 60).data;
+      for (let i = 0; i < d.length; i += 4) if (!(d[i] === d[i + 1] && d[i + 1] === d[i + 2])) return false;
+      return true;
+    });
+    expect(ok).toBe(true);
+  });
+});
