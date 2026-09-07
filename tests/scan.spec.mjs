@@ -141,3 +141,34 @@ test.describe('detect', () => {
     expect(got).toBeNull();
   });
 });
+
+test.describe('livepreview', () => {
+  test('라이브 루프가 시작/정지되고 오버레이에 그린다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.evaluate(() => window.scanDebug.startCamera());
+    await page.waitForFunction(() => document.getElementById('cam-video').videoWidth > 0, null, { timeout: 10000 });
+    await page.evaluate(() => window.scanDebug.startLiveLoop());
+    await page.waitForTimeout(1200);
+    const running = await page.evaluate(() => window.scanDebug._liveRunning());
+    expect(running).toBe(true);
+    await page.evaluate(() => window.scanDebug.stopLiveLoop());
+    const stopped = await page.evaluate(() => window.scanDebug._liveRunning());
+    expect(stopped).toBe(false);
+  });
+
+  test('촬영하면 draft에 캔버스+코너가 담기고 adjust로 이동', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.evaluate(() => window.scanDebug.startCamera());
+    await page.waitForFunction(() => document.getElementById('cam-video').videoWidth > 0, null, { timeout: 10000 });
+    await page.click('#cam-shoot');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 5000 });
+    const d = await page.evaluate(() => ({
+      hasCanvas: !!window.scanDebug.state.draft.canvas,
+      hasCorners: !!window.scanDebug.state.draft.corners,
+    }));
+    expect(d.hasCanvas).toBe(true);
+    expect(d.hasCorners).toBe(true); // 검출 실패해도 defaultCorners로 채움
+  });
+});

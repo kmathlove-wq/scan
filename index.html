@@ -75,11 +75,24 @@ const state = {
 
 const SCREENS = ['loading', 'camera', 'adjust', 'export'];
 function show(name) {
+  const prev = state.screen;
   state.screen = name;
   for (const s of SCREENS) document.getElementById('screen-' + s).hidden = (s !== name);
+  // 카메라 화면을 벗어나면 라이브 루프만 멈춘다(스트림은 유지 — 화면을 자주 오가며
+  // 매번 카메라를 다시 켜면 폰에서 화면이 깜빡인다).
+  if (prev === 'camera' && name !== 'camera') stopLiveLoop();
+  if (name === 'camera') {
+    if (!state.stream) startCamera().catch(() => {});
+    startLiveLoop();
+  }
+  // 정리·저장 화면까지 왔으면 카메라는 완전히 끈다.
+  if (name === 'export') stopCamera();
   render();
 }
-function render() { /* Task 별로 확장 */ }
+function render() {
+  document.getElementById('cam-count').textContent = state.pages.length;
+  document.getElementById('cam-done').disabled = state.pages.length === 0;
+}
 
 function wireEvents() {
   document.getElementById('cam-file-btn').onclick = () => document.getElementById('cam-file').click();
@@ -90,6 +103,12 @@ function wireEvents() {
     show('adjust');
   };
   document.getElementById('cam-live').onchange = (e) => { state.liveDetect = e.target.checked; };
+  document.getElementById('cam-shoot').onclick = () => {
+    const canvas = grabFrame();
+    const corners = detectCorners(canvas) || defaultCorners(canvas.width, canvas.height);
+    state.draft = { canvas, corners };
+    show('adjust');
+  };
   document.getElementById('cam-done').onclick = () => show('export');
 }
 
@@ -265,6 +284,70 @@ function detectCorners(canvas) {
   return ordered;
 }
 
+/* ===== livepreview ===== */
+let _liveTimer = null;
+// 매 틱마다 캔버스를 새로 만들지 않도록 한 장을 재사용한다(4fps라도 모바일 GC 부담↓).
+let _liveScratch = null;
+
+function _liveRunning() { return _liveTimer !== null; }
+
+// 비디오 프레임을 재사용 캔버스에 축소해 그린다(검출용).
+function _frameForDetect(v, maxEdge) {
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const k = Math.min(1, maxEdge / Math.max(vw, vh));
+  const w = Math.max(1, Math.round(vw * k)), h = Math.max(1, Math.round(vh * k));
+  if (!_liveScratch) _liveScratch = document.createElement('canvas');
+  if (_liveScratch.width !== w) _liveScratch.width = w;
+  if (_liveScratch.height !== h) _liveScratch.height = h;
+  _liveScratch.getContext('2d').drawImage(v, 0, 0, w, h);
+  return _liveScratch;
+}
+
+function drawQuad(ctx, corners, dispW, dispH, srcW, srcH) {
+  ctx.clearRect(0, 0, dispW, dispH);
+  if (!corners) return;
+  const sx = dispW / srcW, sy = dispH / srcH;
+  const p = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
+  ctx.strokeStyle = '#4c8dff'; ctx.lineWidth = 3; ctx.fillStyle = 'rgba(76,141,255,0.12)';
+  ctx.beginPath();
+  ctx.moveTo(p[0].x * sx, p[0].y * sy);
+  for (let i = 1; i < 4; i++) ctx.lineTo(p[i].x * sx, p[i].y * sy);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+function startLiveLoop() {
+  stopLiveLoop();
+  const v = document.getElementById('cam-video');
+  const overlay = document.getElementById('cam-overlay');
+  const hint = document.getElementById('cam-hint');
+  const ctx = overlay.getContext('2d');
+  let busy = false;
+  _liveTimer = setInterval(async () => {
+    if (busy || !v.videoWidth) return;
+    overlay.width = overlay.clientWidth; overlay.height = overlay.clientHeight;
+    if (!state.liveDetect) { ctx.clearRect(0, 0, overlay.width, overlay.height); hint.textContent = ''; return; }
+    busy = true;
+    try {
+      const frame = _frameForDetect(v, 640);
+      const corners = detectCorners(frame);
+      const k = corners ? (v.videoWidth / frame.width) : 1;
+      const scaled = corners ? {
+        topLeft: { x: corners.topLeft.x * k, y: corners.topLeft.y * k },
+        topRight: { x: corners.topRight.x * k, y: corners.topRight.y * k },
+        bottomRight: { x: corners.bottomRight.x * k, y: corners.bottomRight.y * k },
+        bottomLeft: { x: corners.bottomLeft.x * k, y: corners.bottomLeft.y * k },
+      } : null;
+      drawQuad(ctx, scaled, overlay.width, overlay.height, v.videoWidth, v.videoHeight);
+      hint.textContent = scaled ? '' : '종이 전체가 화면에 들어오게 해주세요';
+    } catch (e) { /* 프레임 1장 실패는 무시 */ }
+    busy = false;
+  }, 250);
+}
+
+function stopLiveLoop() {
+  if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
+}
+
 /* ===== cvloader ===== */
 // opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
 // 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
@@ -322,8 +405,7 @@ function waitForCv() {
 wireEvents();
 const ready = waitForCv().then(() => {
   state.cvReady = true;
-  show('camera');
-  startCamera().catch(() => {});
+  show('camera'); // show('camera')가 카메라 시작 + 라이브 루프까지 맡는다
 }).catch(err => {
   document.querySelector('#screen-loading p').textContent =
     '준비 중 문제가 생겼어요. 인터넷 연결을 확인하고 새로고침 해주세요.';
@@ -336,6 +418,7 @@ window.scanDebug = {
   geometry: { orderCorners, isConvexQuad, outputSize, mapPoint },
   startCamera, stopCamera, grabFrame, pickFile, downscaleCanvas, canvasFromImage,
   detectCorners, defaultCorners,
+  startLiveLoop, stopLiveLoop, drawQuad, _liveRunning,
 };
 
 show('loading');
