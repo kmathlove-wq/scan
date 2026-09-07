@@ -172,3 +172,44 @@ test.describe('livepreview', () => {
     expect(d.hasCorners).toBe(true); // 검출 실패해도 defaultCorners로 채움
   });
 });
+
+test.describe('adjust', () => {
+  async function toAdjust(page) {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.setInputFiles('#cam-file', 'tests/fixtures/paper-on-desk.jpg');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#adj-handles .handle').length === 4, null, { timeout: 5000 });
+  }
+
+  test('네 개의 핸들이 표시된다', async ({ page }) => {
+    await toAdjust(page);
+    await expect(page.locator('#adj-handles .handle')).toHaveCount(4);
+  });
+
+  test('핸들을 드래그하면 readHandles 결과가 바뀐다', async ({ page }) => {
+    await toAdjust(page);
+    const before = await page.evaluate(() => window.scanDebug.readHandles());
+    const h = page.locator('#adj-handles .handle').first();
+    const box = await h.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 30, { steps: 5 });
+    await page.mouse.up();
+    const after = await page.evaluate(() => window.scanDebug.readHandles());
+    expect(JSON.stringify(after)).not.toBe(JSON.stringify(before));
+  });
+
+  test('꼬인 사각형으로 확정하면 막고 토스트', async ({ page }) => {
+    await toAdjust(page);
+    await page.evaluate(() => {
+      window.scanDebug._setHandles({
+        topLeft: { x: 10, y: 10 }, topRight: { x: 1190, y: 1590 },
+        bottomRight: { x: 1190, y: 10 }, bottomLeft: { x: 10, y: 1590 },
+      });
+    });
+    await page.click('#adj-accept');
+    await expect(page.locator('#toast')).toHaveClass(/show/);
+    expect(await page.evaluate(() => window.scanDebug.state.screen)).toBe('adjust');
+  });
+});

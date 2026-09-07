@@ -45,8 +45,15 @@
 </section>
 
 <section id="screen-adjust" class="screen" hidden>
-  <!-- Task 7에서 채움 -->
-  <div class="center" style="flex:1"><p>모서리 맞추기 화면</p></div>
+  <div id="adj-stage" style="position:relative; flex:1; overflow:hidden; display:flex; align-items:center; justify-content:center; background:#000;">
+    <canvas id="adj-img" style="max-width:100%; max-height:100%;"></canvas>
+    <svg id="adj-handles" style="position:absolute; inset:0; width:100%; height:100%; touch-action:none;"></svg>
+    <canvas id="adj-mag" width="120" height="120" style="position:absolute; border:2px solid #fff; border-radius:50%; pointer-events:none; display:none;"></canvas>
+  </div>
+  <div style="display:flex; justify-content:space-between; padding:16px;">
+    <button id="adj-retake">다시 찍기</button>
+    <button id="adj-accept" class="primary">이 페이지 담기</button>
+  </div>
 </section>
 
 <section id="screen-export" class="screen" hidden>
@@ -85,6 +92,7 @@ function show(name) {
     if (!state.stream) startCamera().catch(() => {});
     startLiveLoop();
   }
+  if (name === 'adjust') openAdjust(state.editingPageId ? _pageAsSource(state.editingPageId) : state.draft);
   // 정리·저장 화면까지 왔으면 카메라는 완전히 끈다.
   if (name === 'export') stopCamera();
   render();
@@ -110,6 +118,15 @@ function wireEvents() {
     show('adjust');
   };
   document.getElementById('cam-done').onclick = () => show('export');
+
+  document.getElementById('adj-retake').onclick = () => {
+    state.draft = null; state.editingPageId = null; show('camera');
+  };
+  document.getElementById('adj-accept').onclick = () => {
+    const corners = orderCorners(Object.values(readHandles()));
+    if (!isConvexQuad(corners)) { showToast('모서리를 사각형이 되게 다시 맞춰주세요'); return; }
+    acceptAdjust(corners); // Task 8에서 정의
+  };
 }
 
 /* ===== util ===== */
@@ -348,6 +365,111 @@ function stopLiveLoop() {
   if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
 }
 
+/* ===== adjust ===== */
+let _adjSource = null;   // { canvas, corners }
+let _adjRects = null;    // { src:{x,y,width,height}, disp:{x,y,width,height} }
+let _handlePts = null;   // 표시좌표(px) 기준 4점
+
+const HKEYS = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'];
+
+// ↓ Task 8에서 실제 구현으로 교체됨
+function acceptAdjust(corners) { showToast('저장 준비 중이에요'); }
+function _pageAsSource(id) { return state.draft; } // 임시
+
+function openAdjust(source) {
+  _adjSource = source;
+  // 파일 선택 경로는 corners가 null로 들어올 수 있다 — 기본 네 모서리로 시작한다.
+  const corners = source.corners || defaultCorners(source.canvas.width, source.canvas.height);
+  const imgCanvas = document.getElementById('adj-img');
+  imgCanvas.width = source.canvas.width;
+  imgCanvas.height = source.canvas.height;
+  imgCanvas.getContext('2d').drawImage(source.canvas, 0, 0);
+  requestAnimationFrame(() => {
+    const stage = document.getElementById('adj-stage').getBoundingClientRect();
+    const box = imgCanvas.getBoundingClientRect();
+    _adjRects = {
+      src: { x: 0, y: 0, width: source.canvas.width, height: source.canvas.height },
+      disp: { x: box.x - stage.x, y: box.y - stage.y, width: box.width, height: box.height },
+    };
+    _handlePts = HKEYS.map(k => mapPoint(corners[k], _adjRects.src, _adjRects.disp));
+    mountHandles();
+  });
+}
+
+function _setHandles(cornersInSrc) {
+  _handlePts = HKEYS.map(k => mapPoint(cornersInSrc[k], _adjRects.src, _adjRects.disp));
+  mountHandles();
+}
+
+function readHandles() {
+  const out = {};
+  HKEYS.forEach((k, i) => { out[k] = mapPoint(_handlePts[i], _adjRects.disp, _adjRects.src); });
+  return out;
+}
+
+function mountHandles() {
+  const svg = document.getElementById('adj-handles');
+  svg.innerHTML = '';
+  const ns = 'http://www.w3.org/2000/svg';
+  // 연결선
+  const poly = document.createElementNS(ns, 'polygon');
+  poly.setAttribute('points', _handlePts.map(p => `${p.x},${p.y}`).join(' '));
+  poly.setAttribute('fill', 'rgba(76,141,255,0.12)');
+  poly.setAttribute('stroke', '#4c8dff');
+  poly.setAttribute('stroke-width', '2');
+  svg.appendChild(poly);
+  _handlePts.forEach((p, i) => {
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('class', 'handle');
+    c.setAttribute('cx', p.x); c.setAttribute('cy', p.y); c.setAttribute('r', 14);
+    c.setAttribute('fill', 'rgba(255,255,255,0.9)');
+    c.setAttribute('stroke', '#4c8dff'); c.setAttribute('stroke-width', '3');
+    c.style.cursor = 'grab';
+    c.addEventListener('pointerdown', (e) => _startDrag(e, i));
+    svg.appendChild(c);
+  });
+}
+
+function _startDrag(e, i) {
+  e.preventDefault();
+  // 포인터 캡처는 마우스 합성 이벤트에서 던질 수 있어 방어적으로 감싼다.
+  try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+  const svg = document.getElementById('adj-handles');
+  const mag = document.getElementById('adj-mag');
+  // move/up 리스너는 window에 건다 — 작은 핸들 원을 커서가 벗어나도 드래그가 끊기지 않게.
+  const move = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, ev.clientY - rect.top));
+    _handlePts[i] = { x, y };
+    mountHandles();
+    drawMagnifier(mag, i);
+  };
+  const up = (ev) => {
+    try { e.target.releasePointerCapture(ev.pointerId); } catch (_) {}
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    mag.style.display = 'none';
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  drawMagnifier(mag, i);
+}
+
+function drawMagnifier(mag, i) {
+  const srcPt = mapPoint(_handlePts[i], _adjRects.disp, _adjRects.src);
+  const z = 3, size = 120, half = size / (2 * z);
+  const ctx = mag.getContext('2d');
+  ctx.clearRect(0, 0, size, size);
+  ctx.drawImage(_adjSource.canvas, srcPt.x - half, srcPt.y - half, half * 2, half * 2, 0, 0, size, size);
+  ctx.strokeStyle = '#4c8dff'; ctx.beginPath();
+  ctx.moveTo(size / 2, 0); ctx.lineTo(size / 2, size); ctx.moveTo(0, size / 2); ctx.lineTo(size, size / 2); ctx.stroke();
+  mag.style.display = 'block';
+  mag.style.left = (i === 0 || i === 3) ? 'auto' : '8px';
+  mag.style.right = (i === 0 || i === 3) ? '8px' : 'auto';
+  mag.style.top = '8px';
+}
+
 /* ===== cvloader ===== */
 // opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
 // 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
@@ -419,6 +541,7 @@ window.scanDebug = {
   startCamera, stopCamera, grabFrame, pickFile, downscaleCanvas, canvasFromImage,
   detectCorners, defaultCorners,
   startLiveLoop, stopLiveLoop, drawQuad, _liveRunning,
+  openAdjust, readHandles, _setHandles,
 };
 
 show('loading');
