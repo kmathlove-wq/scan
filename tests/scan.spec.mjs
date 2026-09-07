@@ -522,12 +522,27 @@ test.describe('회귀 (C1/C2/I6)', () => {
     await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
     await page.waitForFunction(() => window.scanDebug.state.editingPageId !== null, null, { timeout: 5000 });
     await page.waitForFunction(() => document.querySelectorAll('#adj-handles .handle').length === 4, null, { timeout: 5000 });
+    // 재편집 openAdjust 의 rAF 가 저장된 코너(≈truth)를 실제로 반영할 때까지 기다린다 —
+    // 직전 보정 세션의 낡은 핸들 DOM 이 남아 있어 handle 개수만으로는 부족하다.
+    await page.waitForFunction(() => {
+      const h = window.scanDebug.readHandles();
+      if (!h) return false;
+      return Math.abs(h.topLeft.x - 210) < 8 && Math.abs(h.topLeft.y - 190) < 8
+          && Math.abs(h.bottomRight.x - 930) < 8 && Math.abs(h.bottomRight.y - 1410) < 8;
+    }, null, { timeout: 5000 });
     await page.evaluate(() => {
       window.scanDebug._setHandles({
         topLeft: { x: 300, y: 300 }, topRight: { x: 900, y: 300 },
         bottomRight: { x: 900, y: 1200 }, bottomLeft: { x: 300, y: 1200 },
       });
     });
+    // _setHandles 가 반영되고, 디바운스 resize 가 끼어들어도 유지되는지 확정 전에 확인한다.
+    await page.waitForFunction(() => {
+      const h = window.scanDebug.readHandles();
+      if (!h) return false;
+      return Math.abs(h.topLeft.x - 300) < 6 && Math.abs(h.topLeft.y - 300) < 6
+          && Math.abs(h.bottomRight.x - 900) < 6 && Math.abs(h.bottomRight.y - 1200) < 6;
+    }, null, { timeout: 5000 });
     await page.click('#adj-accept');
     await page.waitForFunction(() => window.scanDebug.state.screen === 'export', null, { timeout: 10000 });
     const after = await page.evaluate(() => {
