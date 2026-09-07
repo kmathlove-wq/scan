@@ -81,7 +81,7 @@ const state = {
 };
 
 const SCREENS = ['loading', 'camera', 'adjust', 'export'];
-function show(name) {
+async function show(name) {
   const prev = state.screen;
   state.screen = name;
   for (const s of SCREENS) document.getElementById('screen-' + s).hidden = (s !== name);
@@ -92,7 +92,12 @@ function show(name) {
     if (!state.stream) startCamera().catch(() => {});
     startLiveLoop();
   }
-  if (name === 'adjust') openAdjust(state.editingPageId ? _pageAsSource(state.editingPageId) : state.draft);
+  if (name === 'adjust') {
+    // 재편집이면 저장된 페이지의 원본(dataURL)을 캔버스로 되살린다(Promise) —
+    // 신규 촬영은 이미 캔버스가 있는 state.draft 를 그대로 쓴다.
+    const src = state.editingPageId ? await _pageAsSource(state.editingPageId) : state.draft;
+    openAdjust(src);
+  }
   // 정리·저장 화면까지 왔으면 카메라는 완전히 끈다.
   if (name === 'export') stopCamera();
   render();
@@ -107,7 +112,8 @@ function wireEvents() {
   document.getElementById('cam-file').onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     const canvas = await pickFile(f);
-    state.draft = { canvas, corners: null };
+    // 고른 사진도 셔터 경로처럼 모서리를 자동 검출해 채운다(실패 시 기본 네 모서리).
+    state.draft = { canvas, corners: detectCorners(canvas) || defaultCorners(canvas.width, canvas.height) };
     show('adjust');
   };
   document.getElementById('cam-live').onchange = (e) => { state.liveDetect = e.target.checked; };
@@ -372,10 +378,6 @@ let _handlePts = null;   // 표시좌표(px) 기준 4점
 
 const HKEYS = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'];
 
-// ↓ Task 8에서 실제 구현으로 교체됨
-function acceptAdjust(corners) { showToast('저장 준비 중이에요'); }
-function _pageAsSource(id) { return state.draft; } // 임시
-
 function openAdjust(source) {
   _adjSource = source;
   // 파일 선택 경로는 corners가 null로 들어올 수 있다 — 기본 네 모서리로 시작한다.
@@ -397,11 +399,14 @@ function openAdjust(source) {
 }
 
 function _setHandles(cornersInSrc) {
+  // 화면 좌표계(_adjRects)가 아직 준비 전이면 조용히 무시(디버그 표면 방어).
+  if (!_adjRects) return;
   _handlePts = HKEYS.map(k => mapPoint(cornersInSrc[k], _adjRects.src, _adjRects.disp));
   mountHandles();
 }
 
 function readHandles() {
+  if (!_adjRects || !_handlePts) return null;
   const out = {};
   HKEYS.forEach((k, i) => { out[k] = mapPoint(_handlePts[i], _adjRects.disp, _adjRects.src); });
   return out;
@@ -468,6 +473,108 @@ function drawMagnifier(mag, i) {
   mag.style.left = (i === 0 || i === 3) ? 'auto' : '8px';
   mag.style.right = (i === 0 || i === 3) ? '8px' : 'auto';
   mag.style.top = '8px';
+}
+
+/* ===== warp ===== */
+// 네 모서리를 받아 종이를 반듯하게 편 캔버스를 만든다. 크기는 outputSize 규칙
+// (긴 변 ≤ 2000)을 따른다. jscanify 의 extractPaper 는 내부에서 opencv Mat 몇 개
+// (srcTri/dstTri/M)를 해제하지 않고 남기지만, 페이지 1장당 1회만 호출되고 크기가
+// 매우 작아(4x1, 3x3) 무시 가능한 수준이라 그대로 둔다.
+function extractPaper(sourceCanvas, corners) {
+  const { w, h } = outputSize(corners);
+  // 모서리 핸들을 레터박스(검은 여백)까지 끌어다 놓으면 소스 밖 좌표가 들어올 수
+  // 있다 — 소스 캔버스 범위로 살짝 클램프한다.
+  const clamp = (p) => ({
+    x: Math.max(0, Math.min(sourceCanvas.width, p.x)),
+    y: Math.max(0, Math.min(sourceCanvas.height, p.y)),
+  });
+  const cp = {
+    topLeftCorner: clamp(corners.topLeft),
+    topRightCorner: clamp(corners.topRight),
+    bottomLeftCorner: clamp(corners.bottomLeft),
+    bottomRightCorner: clamp(corners.bottomRight),
+  };
+  const result = _scanner.extractPaper(sourceCanvas, w, h, cp); // canvas 반환
+  if (result instanceof HTMLCanvasElement) return result;
+  // 일부 버전은 dataURL/기타를 반환 → 캔버스로 정규화
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(result, 0, 0, w, h);
+  return c;
+}
+
+/* ===== pagesStore ===== */
+const PAGE_LIMIT = 20;
+let _pid = 0;
+
+function canvasToDataURL(canvas, type = 'image/jpeg', q = 0.92) {
+  return canvas.toDataURL(type, q);
+}
+
+function addPage({ sourceDataURL, corners, warpedCanvas }) {
+  const page = {
+    id: 'p' + (++_pid),
+    sourceDataURL, corners, warpedCanvas,
+    filter: 'auto', filteredCanvas: null,
+  };
+  state.pages.push(page);
+  render();
+  return page;
+}
+
+function removePage(id) {
+  state.pages = state.pages.filter(p => p.id !== id);
+  render();
+}
+
+function movePage(id, dir) {
+  const i = state.pages.findIndex(p => p.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= state.pages.length) return;
+  [state.pages[i], state.pages[j]] = [state.pages[j], state.pages[i]];
+  render();
+}
+
+function setFilter(id, name) {
+  const p = state.pages.find(p => p.id === id);
+  if (p) { p.filter = name; p.filteredCanvas = null; render(); }
+}
+
+// 재편집용: 저장된 페이지의 원본 사진(dataURL)을 캔버스로 되살린다.
+function _pageAsSource(id) {
+  const p = state.pages.find(p => p.id === id);
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      resolve({ canvas: c, corners: p.corners });
+    };
+    img.onerror = () => reject(new Error('저장된 사진을 다시 여는 데 실패했어요'));
+    img.src = p.sourceDataURL;
+  });
+}
+
+async function acceptAdjust(corners) {
+  if (state.editingPageId) {
+    // 재편집: 원본을 되살려 새 모서리로 다시 편다.
+    const source = await _pageAsSource(state.editingPageId);
+    const warped = extractPaper(source.canvas, corners);
+    const p = state.pages.find(p => p.id === state.editingPageId);
+    p.corners = corners; p.warpedCanvas = warped; p.filteredCanvas = null;
+    state.editingPageId = null;
+    render();
+    show('export');
+    return;
+  }
+  // 신규 촬영: draft 를 워프해 새 페이지로 담는다.
+  const source = state.draft;
+  const warped = extractPaper(source.canvas, corners);
+  if (state.pages.length >= PAGE_LIMIT) showToast('페이지가 많아요. 폰이 느려질 수 있어요.');
+  addPage({ sourceDataURL: canvasToDataURL(source.canvas), corners, warpedCanvas: warped });
+  state.draft = null;
+  show('camera');
 }
 
 /* ===== cvloader ===== */
@@ -542,6 +649,7 @@ window.scanDebug = {
   detectCorners, defaultCorners,
   startLiveLoop, stopLiveLoop, drawQuad, _liveRunning,
   openAdjust, readHandles, _setHandles,
+  extractPaper, addPage, removePage, movePage, setFilter, acceptAdjust, PAGE_LIMIT,
 };
 
 show('loading');

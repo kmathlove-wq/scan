@@ -200,16 +200,70 @@ test.describe('adjust', () => {
     expect(JSON.stringify(after)).not.toBe(JSON.stringify(before));
   });
 
-  test('꼬인 사각형으로 확정하면 막고 토스트', async ({ page }) => {
+  test('오목한 사각형으로 확정하면 막고 토스트', async ({ page }) => {
     await toAdjust(page);
     await page.evaluate(() => {
+      // 한 점(500,700)이 나머지 세 점이 이루는 삼각형 안쪽 → orderCorners 로도
+      // 볼록으로 못 편다.
       window.scanDebug._setHandles({
-        topLeft: { x: 10, y: 10 }, topRight: { x: 1190, y: 1590 },
-        bottomRight: { x: 1190, y: 10 }, bottomLeft: { x: 10, y: 1590 },
+        topLeft: { x: 10, y: 10 }, topRight: { x: 1190, y: 10 },
+        bottomRight: { x: 500, y: 700 }, bottomLeft: { x: 10, y: 1590 },
       });
     });
     await page.click('#adj-accept');
     await expect(page.locator('#toast')).toHaveClass(/show/);
     expect(await page.evaluate(() => window.scanDebug.state.screen)).toBe('adjust');
+  });
+});
+
+test.describe('warp + pages', () => {
+  // fresh=false 로 두 번째 촬영: page.goto 는 상태를 초기화하므로, 한 세션에서
+  // 여러 장을 담으려면 첫 호출만 페이지를 새로 연다.
+  async function shootFromFixture(page, { fresh = true } = {}) {
+    if (fresh) {
+      await page.goto('/');
+      await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    }
+    // 같은 파일을 두 번 고르면 Chromium 이 change 이벤트를 다시 쏘지 않는다 — 먼저 비운다.
+    await page.evaluate(() => { document.getElementById('cam-file').value = ''; });
+    await page.setInputFiles('#cam-file', 'tests/fixtures/paper-on-desk.jpg');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+    // _adjRects 는 openAdjust 의 requestAnimationFrame 안에서 세팅된다 — 핸들 4개가
+    // 붙을 때까지 기다린 뒤에야 _setHandles 가 안전하다.
+    await page.waitForFunction(() => document.querySelectorAll('#adj-handles .handle').length === 4, null, { timeout: 5000 });
+    await page.evaluate(async () => {
+      const truth = await (await fetch('/tests/fixtures/paper-on-desk.json')).json();
+      window.scanDebug._setHandles(truth.corners);
+    });
+    await page.click('#adj-accept');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'camera', null, { timeout: 10000 });
+  }
+
+  test('담기 → pages에 1장, 편 캔버스는 비어있지 않다', async ({ page }) => {
+    await shootFromFixture(page);
+    const info = await page.evaluate(() => {
+      const p = window.scanDebug.state.pages[0];
+      const cx = p.warpedCanvas.getContext('2d');
+      const d = cx.getImageData(0, 0, p.warpedCanvas.width, p.warpedCanvas.height).data;
+      let min = 255, max = 0;
+      for (let i = 0; i < d.length; i += 4 * 97) { min = Math.min(min, d[i]); max = Math.max(max, d[i]); }
+      return { n: window.scanDebug.state.pages.length, w: p.warpedCanvas.width, h: p.warpedCanvas.height, spread: max - min };
+    });
+    expect(info.n).toBe(1);
+    expect(info.w).toBeGreaterThan(200);
+    expect(info.h).toBeGreaterThan(info.w); // 세로 문서
+    expect(info.spread).toBeGreaterThan(20); // 글줄 때문에 명암차 존재
+  });
+
+  test('removePage / movePage', async ({ page }) => {
+    await shootFromFixture(page);
+    await shootFromFixture(page, { fresh: false });
+    const ids = await page.evaluate(() => window.scanDebug.state.pages.map(p => p.id));
+    await page.evaluate((id) => window.scanDebug.movePage(id, 1), ids[0]);
+    const reordered = await page.evaluate(() => window.scanDebug.state.pages.map(p => p.id));
+    expect(reordered[0]).toBe(ids[1]);
+    await page.evaluate((id) => window.scanDebug.removePage(id), ids[0]);
+    const left = await page.evaluate(() => window.scanDebug.state.pages.map(p => p.id));
+    expect(left).toEqual([ids[1]]);
   });
 });
