@@ -5,17 +5,1069 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>스캔</title>
 <style>
-  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-         background: #0f1115; color: #e8eaed; display: grid; place-items: center;
-         min-height: 100vh; text-align: center; padding: 24px; }
-  h1 { font-size: 2rem; margin: 0 0 8px; }
-  p { color: #9aa0a6; }
+  :root { --bg:#0f1115; --fg:#e8eaed; --muted:#9aa0a6; --accent:#4c8dff; --danger:#ff5c5c; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; }
+  body { background:var(--bg); color:var(--fg); font-family: system-ui,-apple-system,"Segoe UI",sans-serif; overscroll-behavior:none; }
+  .screen { position:fixed; inset:0; display:flex; flex-direction:column; }
+  [hidden] { display:none !important; }
+  .center { align-items:center; justify-content:center; text-align:center; gap:12px; padding:24px; }
+  button { font:inherit; color:var(--fg); background:#222634; border:1px solid #333a4d; border-radius:10px; padding:12px 16px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .spinner { width:36px; height:36px; border:4px solid #333a4d; border-top-color:var(--accent); border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#000a; padding:10px 16px; border-radius:8px; font-size:14px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:99; }
+  #toast.show { opacity:1; }
 </style>
 </head>
 <body>
-  <main>
-    <h1>스캔</h1>
-    <p>준비 중이에요. 곧 종이를 반듯하게 펴 드릴게요.</p>
-  </main>
+
+<section id="screen-loading" class="screen center">
+  <div class="spinner"></div>
+  <p>사진 도구를 준비하고 있어요…</p>
+</section>
+
+<section id="screen-camera" class="screen" hidden>
+  <div style="position:relative; flex:1; background:#000; overflow:hidden;">
+    <video id="cam-video" playsinline muted autoplay
+           style="width:100%; height:100%; object-fit:contain;"></video>
+    <canvas id="cam-overlay" style="position:absolute; inset:0; width:100%; height:100%;"></canvas>
+    <div id="cam-hint" style="position:absolute; top:12px; left:0; right:0; text-align:center; color:#fff; text-shadow:0 1px 3px #000;"></div>
+    <button id="cam-done" class="primary" style="position:absolute; top:12px; right:12px;" disabled>완료 <span id="cam-count">0</span></button>
+  </div>
+  <div style="display:flex; align-items:center; justify-content:space-around; padding:16px; gap:12px;">
+    <button id="cam-file-btn">사진 파일 고르기</button>
+    <button id="cam-shoot" class="primary" style="width:76px; height:76px; border-radius:50%;" aria-label="촬영"></button>
+    <label style="font-size:13px; color:var(--muted);"><input type="checkbox" id="cam-live" checked> 테두리 표시</label>
+  </div>
+  <input type="file" id="cam-file" accept="image/*" hidden>
+</section>
+
+<section id="screen-adjust" class="screen" hidden>
+  <div id="adj-stage" style="position:relative; flex:1; overflow:hidden; display:flex; align-items:center; justify-content:center; background:#000;">
+    <canvas id="adj-img" style="max-width:100%; max-height:100%;"></canvas>
+    <svg id="adj-handles" style="position:absolute; inset:0; width:100%; height:100%; touch-action:none;"></svg>
+    <canvas id="adj-mag" width="120" height="120" hidden style="position:absolute; border:2px solid #fff; border-radius:50%; pointer-events:none;"></canvas>
+  </div>
+  <div style="display:flex; justify-content:space-between; padding:16px;">
+    <button id="adj-retake">다시 찍기</button>
+    <button id="adj-accept" class="primary">이 페이지 담기</button>
+  </div>
+</section>
+
+<section id="screen-export" class="screen" hidden style="overflow:auto;">
+  <div style="padding:16px; display:flex; flex-direction:column; gap:16px;">
+    <h2 style="margin:0;">정리하고 저장하기</h2>
+    <div id="exp-list" style="display:flex; flex-direction:column; gap:16px;"></div>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+      <label>저장 형식
+        <select id="exp-type">
+          <option value="image">이미지</option>
+          <option value="pdf">PDF</option>
+        </select>
+      </label>
+      <label id="exp-format-wrap">그림 종류
+        <select id="exp-format">
+          <option value="png">PNG</option>
+          <option value="jpg">JPG</option>
+        </select>
+      </label>
+    </div>
+    <div style="display:flex; gap:12px;">
+      <button id="exp-new">새로 스캔 시작</button>
+      <button id="exp-download" class="primary" style="flex:1;">다운로드</button>
+    </div>
+  </div>
+</section>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jscanify@1.4.0/src/jscanify.js"></script>
+<script>
+"use strict";
+
+/* ===== ui: state ===== */
+const state = {
+  screen: 'loading',
+  cvReady: false,
+  liveDetect: true,
+  stream: null,
+  pages: [],
+  draft: null,
+  editingPageId: null,
+  output: { type: 'image', imageFormat: 'png' },
+};
+
+const SCREENS = ['loading', 'camera', 'adjust', 'export'];
+async function show(name) {
+  const prev = state.screen;
+  state.screen = name;
+  for (const s of SCREENS) document.getElementById('screen-' + s).hidden = (s !== name);
+  // 카메라 화면을 벗어나면 라이브 루프만 멈춘다(스트림은 유지 — 화면을 자주 오가며
+  // 매번 카메라를 다시 켜면 폰에서 화면이 깜빡인다).
+  if (prev === 'camera' && name !== 'camera') stopLiveLoop();
+  if (name === 'camera') {
+    if (!state.stream) startCamera().catch(() => {});
+    startLiveLoop();
+  }
+  if (prev === 'adjust' && name !== 'adjust') _removeAdjResize();
+  if (name === 'adjust') {
+    document.getElementById('adj-retake').textContent = state.editingPageId ? '취소' : '다시 찍기';
+    // 재편집이면 저장된 페이지의 원본(dataURL)을 캔버스로 되살린다(Promise) —
+    // 신규 촬영은 이미 캔버스가 있는 state.draft 를 그대로 쓴다.
+    let src;
+    if (state.editingPageId) {
+      try {
+        src = await _pageAsSource(state.editingPageId);
+      } catch (e) {
+        console.warn('re-edit source load failed', e);
+        showToast('사진을 다시 불러오지 못했어요');
+        return show('export');
+      }
+    } else {
+      src = state.draft;
+    }
+    openAdjust(src);
+  }
+  // 정리·저장 화면까지 왔으면 카메라는 완전히 끈다.
+  if (name === 'export') stopCamera();
+  render();
+}
+function render() {
+  document.getElementById('cam-count').textContent = state.pages.length;
+  document.getElementById('cam-done').disabled = state.pages.length === 0;
+  if (state.screen === 'export') renderExport();
+}
+
+function wireEvents() {
+  document.getElementById('cam-file-btn').onclick = () => document.getElementById('cam-file').click();
+  document.getElementById('cam-file').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    // 스펙 §7: 검출·워프 전 긴 변 3000px 로 축소한 사본으로 작업한다.
+    const canvas = downscaleCanvas(await pickFile(f), 3000);
+    // 고른 사진도 셔터 경로처럼 모서리를 자동 검출해 채운다(실패 시 기본 네 모서리).
+    state.draft = { canvas, corners: detectCorners(canvas) || defaultCorners(canvas.width, canvas.height) };
+    show('adjust');
+  };
+  document.getElementById('cam-live').onchange = (e) => { state.liveDetect = e.target.checked; };
+  document.getElementById('cam-shoot').onclick = () => {
+    const canvas = downscaleCanvas(grabFrame(), 3000);
+    const corners = detectCorners(canvas) || defaultCorners(canvas.width, canvas.height);
+    state.draft = { canvas, corners };
+    show('adjust');
+  };
+  document.getElementById('cam-done').onclick = () => show('export');
+
+  document.getElementById('exp-type').onchange = (e) => {
+    state.output.type = e.target.value; state.output._touched = true; renderExport();
+  };
+  document.getElementById('exp-format').onchange = (e) => { state.output.imageFormat = e.target.value; };
+  document.getElementById('exp-download').onclick = () => {
+    if (state.output.type === 'pdf') downloadPdf(); else downloadImages();
+  };
+  document.getElementById('exp-new').onclick = () => {
+    state.pages = []; state.output = { type: 'image', imageFormat: 'png' }; show('camera');
+  };
+
+  document.getElementById('adj-retake').onclick = () => {
+    // 재편집 중이면 "취소" — 편집을 버리고 정리 화면으로 돌아간다(카메라로 안 감).
+    if (state.editingPageId) { state.editingPageId = null; show('export'); return; }
+    state.draft = null; show('camera');
+  };
+  document.getElementById('adj-accept').onclick = async () => {
+    const btn = document.getElementById('adj-accept');
+    if (btn.disabled) return; // 처리 중 더블탭 방지
+    const h = readHandles();
+    if (!h) return;
+    const corners = orderCorners(Object.values(h));
+    if (!isConvexQuad(corners)) { showToast('모서리를 사각형이 되게 다시 맞춰주세요'); return; }
+    btn.disabled = true;
+    try { await acceptAdjust(corners); }
+    finally { btn.disabled = false; }
+  };
+}
+
+/* ===== util ===== */
+// cv.Mat 자동 해제 헬퍼. fn(track) 안에서 track(mat) 으로 등록한 모든 Mat/MatVector 를
+// finally 에서 delete() 한다. cv.add / cv.merge 등에 인라인으로 넘기는 임시 Mat 도
+// 반드시 track 을 거쳐야 누수가 없다.
+function withMats(fn) {
+  const bag = [];
+  const track = (m) => { bag.push(m); return m; };
+  try { return fn(track); }
+  finally { for (const m of bag) { try { m.delete(); } catch (e) {} } }
+}
+
+function showToast(msg, ms = 2200) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+function canvasFromImage(src, w, h) {
+  const iw = src.videoWidth || src.naturalWidth || src.width;
+  const ih = src.videoHeight || src.naturalHeight || src.height;
+  const c = document.createElement('canvas');
+  c.width = w || iw; c.height = h || ih;
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+
+function downscaleCanvas(canvas, maxEdge) {
+  const longEdge = Math.max(canvas.width, canvas.height);
+  if (longEdge <= maxEdge) return canvas;
+  const k = maxEdge / longEdge;
+  return canvasFromImage(canvas, Math.round(canvas.width * k), Math.round(canvas.height * k));
+}
+
+/* ===== geometry ===== */
+function _dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function orderCorners(pts) {
+  const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const byDiff = [...pts].sort((a, b) => (a.x - a.y) - (b.x - b.y));
+  return {
+    topLeft: bySum[0],
+    bottomRight: bySum[3],
+    bottomLeft: byDiff[0],
+    topRight: byDiff[3],
+  };
+}
+
+function isConvexQuad(c) {
+  const p = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = p[i], b = p[(i + 1) % 4], d = p[(i + 2) % 4];
+    const cross = (b.x - a.x) * (d.y - b.y) - (b.y - a.y) * (d.x - b.x);
+    if (Math.abs(cross) < 1e-6) return false;
+    const s = Math.sign(cross);
+    if (sign === 0) sign = s;
+    else if (s !== sign) return false;
+  }
+  return true;
+}
+
+function outputSize(c) {
+  let w = Math.round(Math.max(_dist(c.topLeft, c.topRight), _dist(c.bottomLeft, c.bottomRight)));
+  let h = Math.round(Math.max(_dist(c.topLeft, c.bottomLeft), _dist(c.topRight, c.bottomRight)));
+  const longEdge = Math.max(w, h);
+  if (longEdge > 2000) {
+    const k = 2000 / longEdge;
+    w = Math.round(w * k); h = Math.round(h * k);
+  }
+  return { w, h };
+}
+
+function mapPoint(p, from, to) {
+  return {
+    x: to.x + (p.x - from.x) / from.width * to.width,
+    y: to.y + (p.y - from.y) / from.height * to.height,
+  };
+}
+
+/* ===== camera ===== */
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    state.stream = stream;
+    const v = document.getElementById('cam-video');
+    v.srcObject = stream;
+    await v.play().catch(() => {});
+  } catch (err) {
+    console.warn('camera unavailable', err);
+    document.getElementById('cam-shoot').disabled = true;
+    document.getElementById('cam-hint').textContent = '카메라를 열 수 없어요. 아래 "사진 파일 고르기"를 눌러주세요.';
+    document.getElementById('cam-file-btn').classList.add('primary');
+    throw err;
+  }
+}
+
+function stopCamera() {
+  if (state.stream) { state.stream.getTracks().forEach(t => t.stop()); state.stream = null; }
+}
+
+function grabFrame() {
+  return canvasFromImage(document.getElementById('cam-video'));
+}
+
+function pickFile(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => { const c = canvasFromImage(img); URL.revokeObjectURL(url); resolve(c); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('이미지를 읽을 수 없어요')); };
+    img.src = url;
+  });
+}
+
+/* ===== detect ===== */
+const _scanner = new jscanify();
+
+function defaultCorners(w, h) {
+  const mx = w * 0.08, my = h * 0.08;
+  return {
+    topLeft: { x: mx, y: my },
+    topRight: { x: w - mx, y: my },
+    bottomRight: { x: w - mx, y: h - my },
+    bottomLeft: { x: mx, y: h - my },
+  };
+}
+
+// 사각형 넓이(신발끈 공식). ordered 코너 4점을 받는다.
+function _quadArea(c) {
+  const p = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+  let s = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = p[i], b = p[(i + 1) % 4];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(s) / 2;
+}
+
+// 가장 큰 컨투어(=종이 후보)를 앱 안에서 직접 찾는다. jscanify 1.4.0 의
+// findPaperContour 는 루프 안 `contours.get(i)` 사본을 지우지 않아 실시간 루프에서
+// WASM 힙이 무한히 샌다. 여기서는 채택 안 된 사본을 매번 즉시 delete 하고,
+// 살아남은 best 만 호출자(withMats track)가 최종 해제한다.
+function _findPaperContour(srcMat, track) {
+  const gray = track(new cv.Mat());
+  if (srcMat.channels() > 1) cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+  else srcMat.copyTo(gray);
+  const edges = track(new cv.Mat()); cv.Canny(gray, edges, 50, 200);
+  const blur = track(new cv.Mat()); cv.GaussianBlur(edges, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+  const th = track(new cv.Mat()); cv.threshold(blur, th, 0, 255, cv.THRESH_OTSU);
+  const cs = track(new cv.MatVector()), hi = track(new cv.Mat());
+  cv.findContours(th, cs, hi, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
+  let best = null, bestArea = 0;
+  for (let i = 0; i < cs.size(); i++) {
+    const ci = cs.get(i);
+    const a = cv.contourArea(ci);
+    if (a > bestArea) { bestArea = a; if (best) best.delete(); best = ci; }
+    else ci.delete();
+  }
+  return best; // withMats track 이 최종 delete
+}
+
+function detectCorners(canvas) {
+  const small = downscaleCanvas(canvas, 3000);
+  const k = canvas.width / small.width;
+  let ordered = null;
+  try {
+    ordered = withMats((track) => {
+      const src = track(cv.imread(small));
+      const contour = _findPaperContour(src, track);
+      if (!contour) return null;
+      track(contour);
+      const cornerObj = _scanner.getCornerPoints(contour); // Mat 할당 없음(minAreaRect + 극점)
+      if (!cornerObj) return null;
+      const pts = [
+        cornerObj.topLeftCorner, cornerObj.topRightCorner,
+        cornerObj.bottomRightCorner, cornerObj.bottomLeftCorner,
+      ];
+      if (pts.some(p => !p || !isFinite(p.x) || !isFinite(p.y))) return null;
+      const scaled = pts.map(p => ({ x: p.x * k, y: p.y * k }));
+      return orderCorners(scaled);
+    });
+  } catch (e) {
+    console.warn('detect failed', e);
+    return null;
+  }
+  if (!ordered) return null;
+  const imgArea = canvas.width * canvas.height;
+  const area = _quadArea(ordered);
+  // 넓이가 이미지의 15% 미만이면 오검출로 간주
+  if (area < imgArea * 0.15) return null;
+  // 전체 프레임 가드: 종이가 없을 때 jscanify가 이미지 테두리 전체를 사각형으로
+  // 잡아내는 경우가 있다. 넓이가 이미지의 97%를 넘거나 네 모서리가 모두 이미지
+  // 꼭짓점에서 몇 px 안쪽이면 "종이 없음"(null)으로 본다.
+  const m = Math.max(4, canvas.width * 0.01, canvas.height * 0.01);
+  const atFrame =
+    ordered.topLeft.x <= m && ordered.topLeft.y <= m &&
+    ordered.topRight.x >= canvas.width - m && ordered.topRight.y <= m &&
+    ordered.bottomRight.x >= canvas.width - m && ordered.bottomRight.y >= canvas.height - m &&
+    ordered.bottomLeft.x <= m && ordered.bottomLeft.y >= canvas.height - m;
+  if (atFrame || area > imgArea * 0.97) return null;
+  return ordered;
+}
+
+/* ===== livepreview ===== */
+let _liveTimer = null;
+// 매 틱마다 캔버스를 새로 만들지 않도록 한 장을 재사용한다(4fps라도 모바일 GC 부담↓).
+let _liveScratch = null;
+
+function _liveRunning() { return _liveTimer !== null; }
+
+// 비디오 프레임을 재사용 캔버스에 축소해 그린다(검출용).
+function _frameForDetect(v, maxEdge) {
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const k = Math.min(1, maxEdge / Math.max(vw, vh));
+  const w = Math.max(1, Math.round(vw * k)), h = Math.max(1, Math.round(vh * k));
+  if (!_liveScratch) _liveScratch = document.createElement('canvas');
+  if (_liveScratch.width !== w) _liveScratch.width = w;
+  if (_liveScratch.height !== h) _liveScratch.height = h;
+  _liveScratch.getContext('2d').drawImage(v, 0, 0, w, h);
+  return _liveScratch;
+}
+
+// object-fit: contain 로 표시되는 <video> 의 실제 그려진 사각형(레터박스 반영)을 구한다.
+// scale = min(박스/영상) 로 맞추고 남는 여백만큼 가운데로 민다.
+function videoDisplayRect(boxW, boxH, videoW, videoH) {
+  if (!boxW || !boxH || !videoW || !videoH) {
+    return { x: 0, y: 0, width: boxW || 0, height: boxH || 0 };
+  }
+  const scale = Math.min(boxW / videoW, boxH / videoH);
+  const w = videoW * scale, h = videoH * scale;
+  return { x: (boxW - w) / 2, y: (boxH - h) / 2, width: w, height: h };
+}
+
+function drawQuad(ctx, corners, dispW, dispH, srcW, srcH, rect) {
+  ctx.clearRect(0, 0, dispW, dispH);
+  if (!corners) return;
+  // rect = 오버레이 안에서 영상이 실제로 그려진 영역(레터박스 보정). 없으면 전체.
+  const r = rect || { x: 0, y: 0, width: dispW, height: dispH };
+  const sx = r.width / srcW, sy = r.height / srcH;
+  const p = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
+  ctx.strokeStyle = '#4c8dff'; ctx.lineWidth = 3; ctx.fillStyle = 'rgba(76,141,255,0.12)';
+  ctx.beginPath();
+  ctx.moveTo(r.x + p[0].x * sx, r.y + p[0].y * sy);
+  for (let i = 1; i < 4; i++) ctx.lineTo(r.x + p[i].x * sx, r.y + p[i].y * sy);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+// 탭이 백그라운드로 가면 라이브 루프를 멈추고(배터리·CPU 절약), 돌아오면 재개한다.
+let _liveVisWired = false;
+function _wireLiveVisibility() {
+  if (_liveVisWired) return;
+  _liveVisWired = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopLiveLoop();
+    else if (state.screen === 'camera' && state.stream) startLiveLoop();
+  });
+}
+
+function startLiveLoop() {
+  stopLiveLoop();
+  _wireLiveVisibility();
+  const v = document.getElementById('cam-video');
+  const overlay = document.getElementById('cam-overlay');
+  const hint = document.getElementById('cam-hint');
+  const ctx = overlay.getContext('2d');
+  let busy = false;
+  _liveTimer = setInterval(async () => {
+    // 카메라가 안 열렸거나(파일 전용) 탭이 백그라운드면 아무 일도 안 한다.
+    if (busy || !state.stream || document.hidden || !v.videoWidth) return;
+    // 오버레이 픽셀 크기를 CSS 박스에 맞춘다(레티나 배율은 성능 위해 1배 유지).
+    // 매 틱 대입하면 캔버스가 지워지므로 값이 바뀔 때만 손댄다.
+    if (overlay.width !== overlay.clientWidth) overlay.width = overlay.clientWidth;
+    if (overlay.height !== overlay.clientHeight) overlay.height = overlay.clientHeight;
+    if (!state.liveDetect) { ctx.clearRect(0, 0, overlay.width, overlay.height); hint.textContent = ''; return; }
+    busy = true;
+    try {
+      const frame = _frameForDetect(v, 640);
+      const corners = detectCorners(frame);
+      const k = corners ? (v.videoWidth / frame.width) : 1;
+      const scaled = corners ? {
+        topLeft: { x: corners.topLeft.x * k, y: corners.topLeft.y * k },
+        topRight: { x: corners.topRight.x * k, y: corners.topRight.y * k },
+        bottomRight: { x: corners.bottomRight.x * k, y: corners.bottomRight.y * k },
+        bottomLeft: { x: corners.bottomLeft.x * k, y: corners.bottomLeft.y * k },
+      } : null;
+      const rect = videoDisplayRect(overlay.width, overlay.height, v.videoWidth, v.videoHeight);
+      drawQuad(ctx, scaled, overlay.width, overlay.height, v.videoWidth, v.videoHeight, rect);
+      hint.textContent = scaled ? '' : '종이 전체가 화면에 들어오게 해주세요';
+    } catch (e) { /* 프레임 1장 실패는 무시 */ }
+    busy = false;
+  }, 250);
+}
+
+function stopLiveLoop() {
+  if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
+}
+
+/* ===== adjust ===== */
+let _adjSource = null;   // { canvas, corners }
+let _adjRects = null;    // { src:{x,y,width,height}, disp:{x,y,width,height} }
+let _handlePts = null;   // 표시좌표(px) 기준 4점
+
+const HKEYS = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'];
+
+// 화면 회전·창 크기 변경 후 핸들이 어긋나지 않도록 표시 좌표계만 다시 잰다(디바운스).
+// 이때 _adjSource.corners 로 되돌리면 사용자가 옮겨 둔 핸들이 사라지므로,
+// 지금 핸들이 가리키는 SOURCE 좌표를 유지한 채 새 화면 크기로 다시 투영한다.
+// adjust 화면을 벗어나면 리스너를 떼서, 낡은 상태로 재측정이 불리지 않게 한다.
+let _adjResizeHandler = null;
+let _adjResizeTimer = null;
+function _installAdjResize() {
+  if (_adjResizeHandler) return;
+  _adjResizeHandler = () => {
+    clearTimeout(_adjResizeTimer);
+    _adjResizeTimer = setTimeout(() => {
+      if (state.screen === 'adjust' && _adjSource) _remeasureAdjRects();
+    }, 200);
+  };
+  window.addEventListener('resize', _adjResizeHandler);
+}
+function _removeAdjResize() {
+  // 디바운스 타이머도 함께 취소한다 — adjust 를 벗어난 뒤 뒤늦게 불려서
+  // (특히 곧바로 재편집으로 다시 들어왔을 때) 핸들을 흔들지 않도록.
+  clearTimeout(_adjResizeTimer);
+  _adjResizeTimer = null;
+  if (!_adjResizeHandler) return;
+  window.removeEventListener('resize', _adjResizeHandler);
+  _adjResizeHandler = null;
+}
+
+// adj-img 의 현재 화면 위치·크기를 재서 표시 좌표계(_adjRects)를 세운다.
+function _measureAdjRects() {
+  const imgCanvas = document.getElementById('adj-img');
+  const stage = document.getElementById('adj-stage').getBoundingClientRect();
+  const box = imgCanvas.getBoundingClientRect();
+  _adjRects = {
+    src: { x: 0, y: 0, width: _adjSource.canvas.width, height: _adjSource.canvas.height },
+    disp: { x: box.x - stage.x, y: box.y - stage.y, width: box.width, height: box.height },
+  };
+}
+
+function openAdjust(source) {
+  _adjSource = source;
+  _installAdjResize();
+  // 파일 선택 경로는 corners가 null로 들어올 수 있다 — 기본 네 모서리로 시작한다.
+  const corners = source.corners || defaultCorners(source.canvas.width, source.canvas.height);
+  const imgCanvas = document.getElementById('adj-img');
+  imgCanvas.width = source.canvas.width;
+  imgCanvas.height = source.canvas.height;
+  imgCanvas.getContext('2d').drawImage(source.canvas, 0, 0);
+  requestAnimationFrame(() => {
+    _measureAdjRects();
+    _handlePts = HKEYS.map(k => mapPoint(corners[k], _adjRects.src, _adjRects.disp));
+    mountHandles();
+  });
+}
+
+// 창 크기·화면 회전 뒤: 저장된 corners 로 되돌리지 않고, 지금 핸들이 가리키는
+// SOURCE 좌표를 그대로 유지한 채 새 표시 좌표계로 다시 투영한다.
+function _remeasureAdjRects() {
+  if (!_adjSource) return;
+  // 좌표계나 핸들이 아직 없으면(첫 진입 rAF 이전) 정식 경로로 초기화한다.
+  if (!_adjRects || !_handlePts) { openAdjust(_adjSource); return; }
+  const cur = readHandles(); // 낡은 _adjRects 로 현재 핸들을 SOURCE 좌표로 환산
+  if (!cur) { openAdjust(_adjSource); return; }
+  _measureAdjRects();
+  _handlePts = HKEYS.map(k => mapPoint(cur[k], _adjRects.src, _adjRects.disp));
+  mountHandles();
+}
+
+function _setHandles(cornersInSrc) {
+  // 화면 좌표계(_adjRects)가 아직 준비 전이면 조용히 무시(디버그 표면 방어).
+  if (!_adjRects) return;
+  _handlePts = HKEYS.map(k => mapPoint(cornersInSrc[k], _adjRects.src, _adjRects.disp));
+  mountHandles();
+}
+
+function readHandles() {
+  if (!_adjRects || !_handlePts) return null;
+  const out = {};
+  HKEYS.forEach((k, i) => { out[k] = mapPoint(_handlePts[i], _adjRects.disp, _adjRects.src); });
+  return out;
+}
+
+function mountHandles() {
+  const svg = document.getElementById('adj-handles');
+  svg.innerHTML = '';
+  const ns = 'http://www.w3.org/2000/svg';
+  // 연결선
+  const poly = document.createElementNS(ns, 'polygon');
+  poly.setAttribute('points', _handlePts.map(p => `${p.x},${p.y}`).join(' '));
+  poly.setAttribute('fill', 'rgba(76,141,255,0.12)');
+  poly.setAttribute('stroke', '#4c8dff');
+  poly.setAttribute('stroke-width', '2');
+  svg.appendChild(poly);
+  _handlePts.forEach((p, i) => {
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('class', 'handle');
+    c.setAttribute('cx', p.x); c.setAttribute('cy', p.y); c.setAttribute('r', 14);
+    c.setAttribute('fill', 'rgba(255,255,255,0.9)');
+    c.setAttribute('stroke', '#4c8dff'); c.setAttribute('stroke-width', '3');
+    c.style.cursor = 'grab';
+    c.addEventListener('pointerdown', (e) => _startDrag(e, i));
+    svg.appendChild(c);
+  });
+}
+
+function _startDrag(e, i) {
+  e.preventDefault();
+  // 포인터 캡처는 마우스 합성 이벤트에서 던질 수 있어 방어적으로 감싼다.
+  try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+  const svg = document.getElementById('adj-handles');
+  const mag = document.getElementById('adj-mag');
+  // move/up 리스너는 window에 건다 — 작은 핸들 원을 커서가 벗어나도 드래그가 끊기지 않게.
+  const move = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, ev.clientY - rect.top));
+    _handlePts[i] = { x, y };
+    mountHandles();
+    drawMagnifier(mag, i);
+  };
+  const up = (ev) => {
+    try { e.target.releasePointerCapture(ev.pointerId); } catch (_) {}
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    mag.hidden = true;
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  // 시스템 제스처 등으로 포인터가 취소돼도 드래그를 같은 방식으로 정리한다.
+  window.addEventListener('pointercancel', up);
+  drawMagnifier(mag, i);
+}
+
+function drawMagnifier(mag, i) {
+  const srcPt = mapPoint(_handlePts[i], _adjRects.disp, _adjRects.src);
+  const z = 3, size = 120, half = size / (2 * z);
+  const ctx = mag.getContext('2d');
+  ctx.clearRect(0, 0, size, size);
+  ctx.drawImage(_adjSource.canvas, srcPt.x - half, srcPt.y - half, half * 2, half * 2, 0, 0, size, size);
+  ctx.strokeStyle = '#4c8dff'; ctx.beginPath();
+  ctx.moveTo(size / 2, 0); ctx.lineTo(size / 2, size); ctx.moveTo(0, size / 2); ctx.lineTo(size, size / 2); ctx.stroke();
+  mag.hidden = false;
+  mag.style.left = (i === 0 || i === 3) ? 'auto' : '8px';
+  mag.style.right = (i === 0 || i === 3) ? '8px' : 'auto';
+  mag.style.top = '8px';
+}
+
+/* ===== warp ===== */
+// 네 모서리를 받아 종이를 반듯하게 편 캔버스를 만든다. 크기는 outputSize 규칙
+// (긴 변 ≤ 2000)을 따른다. jscanify 의 extractPaper 는 내부에서 opencv Mat 몇 개
+// (srcTri/dstTri/M)를 해제하지 않고 남기지만, 페이지 1장당 1회만 호출되고 크기가
+// 매우 작아(4x1, 3x3) 무시 가능한 수준이라 그대로 둔다.
+function extractPaper(sourceCanvas, corners) {
+  const { w, h } = outputSize(corners);
+  // 모서리 핸들을 레터박스(검은 여백)까지 끌어다 놓으면 소스 밖 좌표가 들어올 수
+  // 있다 — 소스 캔버스 범위로 살짝 클램프한다.
+  const clamp = (p) => ({
+    x: Math.max(0, Math.min(sourceCanvas.width, p.x)),
+    y: Math.max(0, Math.min(sourceCanvas.height, p.y)),
+  });
+  const cp = {
+    topLeftCorner: clamp(corners.topLeft),
+    topRightCorner: clamp(corners.topRight),
+    bottomLeftCorner: clamp(corners.bottomLeft),
+    bottomRightCorner: clamp(corners.bottomRight),
+  };
+  const result = _scanner.extractPaper(sourceCanvas, w, h, cp); // canvas 반환
+  if (result instanceof HTMLCanvasElement) return result;
+  // 일부 버전은 dataURL/기타를 반환 → 캔버스로 정규화
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(result, 0, 0, w, h);
+  return c;
+}
+
+/* ===== pagesStore ===== */
+const PAGE_LIMIT = 20;
+let _pid = 0;
+
+function canvasToDataURL(canvas, type = 'image/jpeg', q = 0.92) {
+  return canvas.toDataURL(type, q);
+}
+
+function addPage({ sourceDataURL, corners, warpedCanvas }) {
+  const page = {
+    id: 'p' + (++_pid),
+    sourceDataURL, corners, warpedCanvas,
+    filter: 'auto', filteredCanvas: null,
+  };
+  state.pages.push(page);
+  render();
+  return page;
+}
+
+function removePage(id) {
+  state.pages = state.pages.filter(p => p.id !== id);
+  render();
+}
+
+function movePage(id, dir) {
+  const i = state.pages.findIndex(p => p.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= state.pages.length) return;
+  [state.pages[i], state.pages[j]] = [state.pages[j], state.pages[i]];
+  render();
+}
+
+function setFilter(id, name) {
+  const p = state.pages.find(p => p.id === id);
+  if (p) { p.filter = name; p.filteredCanvas = null; render(); }
+}
+
+// 재편집용: 저장된 페이지의 원본 사진(dataURL)을 캔버스로 되살린다.
+function _pageAsSource(id) {
+  const p = state.pages.find(p => p.id === id);
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      resolve({ canvas: c, corners: p.corners });
+    };
+    img.onerror = () => reject(new Error('저장된 사진을 다시 여는 데 실패했어요'));
+    img.src = p.sourceDataURL;
+  });
+}
+
+async function acceptAdjust(corners) {
+  if (state.editingPageId) {
+    // 재편집: 원본을 되살려 새 모서리로 다시 편다.
+    let source;
+    try {
+      source = await _pageAsSource(state.editingPageId);
+    } catch (e) {
+      console.warn('re-edit source load failed', e);
+      showToast('사진을 다시 불러오지 못했어요');
+      state.editingPageId = null;
+      show('export');
+      return;
+    }
+    const warped = extractPaper(source.canvas, corners);
+    const p = state.pages.find(p => p.id === state.editingPageId);
+    p.corners = corners; p.warpedCanvas = warped; p.filteredCanvas = null;
+    state.editingPageId = null;
+    render();
+    show('export');
+    return;
+  }
+  // 신규 촬영: draft 를 워프해 새 페이지로 담는다.
+  const source = state.draft;
+  const warped = extractPaper(source.canvas, corners);
+  if (state.pages.length >= PAGE_LIMIT) showToast('페이지가 많아요. 폰이 느려질 수 있어요.');
+  addPage({ sourceDataURL: canvasToDataURL(source.canvas), corners, warpedCanvas: warped });
+  state.draft = null;
+  show('camera');
+}
+
+/* ===== filters ===== */
+// warpedCanvas → filteredCanvas. 모든 cv.Mat 은 withMats 의 track 으로 등록해
+// 예외 여부와 무관하게 해제한다. applyFilter 는 입력과 같은 크기의 새 캔버스를 돌려주고,
+// 어떤 예외가 나도 원본 복사본 + console.warn 으로 안전하게 떨어진다.
+
+function _canvasOut(mat, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  cv.imshow(c, mat);
+  return c;
+}
+
+function _plainCopy(canvas) {
+  const c = document.createElement('canvas');
+  c.width = canvas.width; c.height = canvas.height;
+  c.getContext('2d').drawImage(canvas, 0, 0);
+  return c;
+}
+
+// 회색: RGBA → GRAY → RGBA (R=G=B)
+function fGray(src, track) {
+  const g = track(new cv.Mat());
+  cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+  const out = track(new cv.Mat());
+  cv.cvtColor(g, out, cv.COLOR_GRAY2RGBA);
+  return out;
+}
+
+// 흑백: 적응형 임계값(글자 문서용)
+function fBw(src, track) {
+  const g = track(new cv.Mat());
+  cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+  const bin = track(new cv.Mat());
+  cv.adaptiveThreshold(g, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 15, 10);
+  const out = track(new cv.Mat());
+  cv.cvtColor(bin, out, cv.COLOR_GRAY2RGBA);
+  return out;
+}
+
+// 자동보정: 그림자·조명 얼룩 제거 + 살짝 선명화. 컬러 유지(spec §5).
+// 배경 밝기를 큰 커널 블러로 추정 → 원본 RGB 를 배경으로 나눠(평균 밝기로 재조정)
+// 조명 기울기를 평탄화한다. 3채널 전역 normalize 는 색이 틀어지므로 쓰지 않는다.
+function fAuto(src, track) {
+  const rgb = track(new cv.Mat());
+  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);                       // 8UC3
+  const gray = track(new cv.Mat());
+  cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);                      // 8UC1
+
+  // 배경 밝기 추정은 1/8 크기 축소본에서 큰 커널 블러 → 다시 확대한다.
+  // 시각적으로는 같지만 커널이 작아져 50~100배 빠르다(2000px에서 3.5초 → 수십 ms).
+  const s = track(new cv.Mat());
+  const sw = Math.max(64, Math.round(gray.cols / 8)), sh = Math.max(64, Math.round(gray.rows / 8));
+  cv.resize(gray, s, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+  let kk = Math.max(3, Math.round(sw / 8)); if (kk % 2 === 0) kk += 1;
+  const bs = track(new cv.Mat());
+  cv.GaussianBlur(s, bs, new cv.Size(kk, kk), 0);                 // 축소본에서 조명 추정
+  const bg = track(new cv.Mat());
+  cv.resize(bs, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
+  const bgF = track(new cv.Mat());
+  bg.convertTo(bgF, cv.CV_32F, 1, 1);                             // +1 을 접어 0 나눗셈 방지
+  // 배경을 3채널로 확장
+  const mv = track(new cv.MatVector());
+  mv.push_back(bgF); mv.push_back(bgF); mv.push_back(bgF);
+  const bg3 = track(new cv.Mat());
+  cv.merge(mv, bg3);                                              // 32FC3
+
+  const rgbF = track(new cv.Mat());
+  rgb.convertTo(rgbF, cv.CV_32FC3);
+  const meanBg = cv.mean(bgF)[0];
+  const normF = track(new cv.Mat());
+  cv.divide(rgbF, bg3, normF, meanBg);                            // rgb/bg * meanBg
+  const norm8 = track(new cv.Mat());
+  normF.convertTo(norm8, cv.CV_8UC3);                             // 포화 변환(0~255)
+
+  // 약한 언샤프 마스크(또렷)
+  const blur = track(new cv.Mat());
+  cv.GaussianBlur(norm8, blur, new cv.Size(0, 0), 3);
+  const sharp = track(new cv.Mat());
+  cv.addWeighted(norm8, 1.3, blur, -0.3, 0, sharp);
+
+  const out = track(new cv.Mat());
+  cv.cvtColor(sharp, out, cv.COLOR_RGB2RGBA);
+  return out;
+}
+
+// applyFilter.failed: 직전 호출이 예외로 원본 폴백했는지. 호출자(pageOutputCanvas)가
+// 이 플래그를 보고 페이지를 '원본'으로 되돌리고 토스트를 띄운다(스펙 §7).
+function applyFilter(canvas, name) {
+  applyFilter.failed = false;
+  if (name === 'original') return _plainCopy(canvas);
+  const fn = name === 'gray' ? fGray : name === 'bw' ? fBw : name === 'auto' ? fAuto : null;
+  if (!fn) return _plainCopy(canvas); // 알 수 없는 필터명은 원본 복사(가장 싼 경로)
+  try {
+    return withMats((track) => {
+      const src = track(cv.imread(canvas));
+      const out = fn(src, track);
+      return _canvasOut(out, canvas.width, canvas.height);
+    });
+  } catch (e) {
+    console.warn('filter failed, fallback original', name, e);
+    applyFilter.failed = true;
+    return _plainCopy(canvas);
+  }
+}
+
+/* ===== exporter ===== */
+// 페이지의 최종 출력 캔버스(필터 적용 결과)를 만들어 page.filteredCanvas 에 캐시한다.
+// applyFilter 는 어떤 예외에도 원본 복사본을 돌려주므로 여기서 예외가 새지 않는다.
+function pageOutputCanvas(page) {
+  if (!page.filteredCanvas) {
+    const out = applyFilter(page.warpedCanvas, page.filter);
+    if (applyFilter.failed && page.filter !== 'original') {
+      // 스펙 §7: 보정 실패 페이지는 '원본'으로 되돌리고 토스트 안내.
+      page.filter = 'original';
+      page.filteredCanvas = _plainCopy(page.warpedCanvas);
+      showToast('이 사진은 보정이 안 돼서 원본으로 두었어요');
+      setTimeout(() => { if (state.screen === 'export') render(); }, 0);
+    } else {
+      page.filteredCanvas = out;
+    }
+  }
+  return page.filteredCanvas;
+}
+
+function canvasToBlob(canvas, type = 'image/png', q) {
+  return new Promise((res) => canvas.toBlob(res, type, q));
+}
+
+// <a download> 로 파일 저장을 트리거한다(깃허브 페이지 = 실제 브라우저에서 동작).
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+async function downloadImages() {
+  if (!state.pages.length) return;
+  const fmt = state.output.imageFormat;
+  const type = fmt === 'png' ? 'image/png' : 'image/jpeg';
+  const q = fmt === 'png' ? undefined : 0.9;
+  if (state.pages.length === 1) {
+    const blob = await canvasToBlob(pageOutputCanvas(state.pages[0]), type, q);
+    if (!blob) { showToast('사진을 저장하지 못했어요. 다시 시도해주세요'); return; }
+    _triggerDownload(blob, `스캔.${fmt}`);
+    return;
+  }
+  showToast('사진을 여러 장 저장해요. 브라우저가 물어보면 "허용"을 눌러주세요.');
+  for (let i = 0; i < state.pages.length; i++) {
+    const blob = await canvasToBlob(pageOutputCanvas(state.pages[i]), type, q);
+    if (!blob) { showToast(`${i + 1}번째 사진을 저장하지 못했어요`); continue; }
+    _triggerDownload(blob, `스캔-${i + 1}.${fmt}`);
+    await new Promise(r => setTimeout(r, 400)); // 브라우저 다중 다운로드 간격
+  }
+}
+
+function downloadPdf() {
+  if (!state.pages.length) return;
+  const { jsPDF } = window.jspdf;
+  let pdf = null;
+  state.pages.forEach((page, i) => {
+    const c = pageOutputCanvas(page);
+    const orient = c.width >= c.height ? 'l' : 'p';
+    if (i === 0) pdf = new jsPDF({ unit: 'px', format: [c.width, c.height], orientation: orient });
+    else pdf.addPage([c.width, c.height], orient);
+    pdf.addImage(c.toDataURL('image/jpeg', 0.85), 'JPEG', 0, 0, c.width, c.height);
+  });
+  if (pdf) pdf.save('스캔.pdf');
+}
+
+function renderExport() {
+  const list = document.getElementById('exp-list');
+  list.innerHTML = '';
+  state.pages.forEach((page, idx) => {
+    const item = document.createElement('div');
+    item.className = 'exp-item';
+    item.style.cssText = 'border:1px solid #333a4d; border-radius:10px; padding:12px; display:flex; gap:12px;';
+    const prev = pageOutputCanvas(page);
+    const thumb = document.createElement('canvas');
+    const tw = 120, th = Math.round(tw * prev.height / prev.width);
+    thumb.width = tw; thumb.height = th;
+    thumb.getContext('2d').drawImage(prev, 0, 0, tw, th);
+    item.appendChild(thumb);
+    const right = document.createElement('div');
+    right.style.cssText = 'flex:1; display:flex; flex-direction:column; gap:8px;';
+    right.innerHTML = `
+      <div style="display:flex; gap:6px; flex-wrap:wrap;">
+        ${[['original','원본'],['auto','자동보정'],['bw','흑백'],['gray','회색']].map(([v,l]) =>
+          `<button data-filter="${v}" style="${page.filter===v?'background:var(--accent);border-color:var(--accent);color:#fff;':''}">${l}</button>`).join('')}
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button data-act="up" ${idx===0?'disabled':''}>▲</button>
+        <button data-act="down" ${idx===state.pages.length-1?'disabled':''}>▼</button>
+        <button data-act="edit">다시 보정</button>
+        <button data-act="del" style="color:var(--danger);">삭제</button>
+      </div>`;
+    right.querySelectorAll('[data-filter]').forEach(b =>
+      b.onclick = () => setFilter(page.id, b.dataset.filter));
+    right.querySelector('[data-act=up]').onclick = () => movePage(page.id, -1);
+    right.querySelector('[data-act=down]').onclick = () => movePage(page.id, 1);
+    right.querySelector('[data-act=del]').onclick = () => removePage(page.id);
+    right.querySelector('[data-act=edit]').onclick = () => { state.editingPageId = page.id; show('adjust'); };
+    item.appendChild(right);
+    list.appendChild(item);
+  });
+  // 출력 옵션 상태 반영 — 사용자가 안 건드렸으면 장수에 따라 기본값 자동 선택
+  // (스펙 §3.3: 여러 장이면 PDF, 1장이면 이미지). 한 번이라도 직접 고르면 그 선택 유지.
+  if (!state.output._touched) state.output.type = state.pages.length > 1 ? 'pdf' : 'image';
+  document.getElementById('exp-type').value = state.output.type;
+  document.getElementById('exp-format-wrap').hidden = state.output.type !== 'image';
+  document.getElementById('exp-download').disabled = state.pages.length === 0;
+}
+
+/* ===== cvloader ===== */
+// opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
+// 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
+// 함수가 되는 시점으로 판정한다(`cv.onRuntimeInitialized` 콜백도 함께 건다).
+// 주의 1: 이 빌드의 `cv` 는 thenable 이지만 `await cv` 하면 헤드리스 환경에서
+//   영원히 멈춘다. 절대 await 하지 말고 폴링만 한다.
+// 주의 2: opencv.js(약 10MB)를 <script>로 정적 삽입하면 페이지 load 이벤트가
+//   그만큼 늦어져 첫 화면(로딩)이 안 보인다. load 후에 동적으로 붙인다.
+const CV_SRC = 'https://docs.opencv.org/4.9.0/opencv.js';
+
+function cvIsReady() {
+  return !!(window.cv && typeof window.cv.Mat === 'function');
+}
+
+function injectCv() {
+  if (document.getElementById('cv-script')) return;
+  const s = document.createElement('script');
+  s.id = 'cv-script';
+  s.async = true;
+  s.src = CV_SRC;
+  s.onerror = () => { injectCv._failed = true; };
+  document.head.appendChild(s);
+}
+
+function waitForCv() {
+  return new Promise((resolve, reject) => {
+    if (document.readyState === 'complete') injectCv();
+    else window.addEventListener('load', injectCv, { once: true });
+
+    if (cvIsReady()) return resolve();
+    let settled = false;
+    function cleanup() { clearInterval(timer); clearTimeout(deadline); }
+    const done = () => {
+      if (settled) return;
+      if (cvIsReady()) { settled = true; cleanup(); resolve(); }
+      else if (injectCv._failed) { settled = true; cleanup(); reject(new Error('OpenCV 스크립트를 불러오지 못했어요')); }
+    };
+    const timer = setInterval(() => {
+      done();
+      if (!settled && window.cv && typeof window.cv === 'object' && !window.cv.__scanHooked) {
+        window.cv.__scanHooked = true;
+        const prev = window.cv.onRuntimeInitialized;
+        window.cv.onRuntimeInitialized = () => { if (typeof prev === 'function') { try { prev(); } catch (e) {} } done(); };
+      }
+    }, 100);
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true; cleanup();
+      reject(new Error('OpenCV 로딩 시간 초과'));
+    }, 60000);
+  });
+}
+
+/* ===== bootstrap ===== */
+wireEvents();
+
+// 로딩이 30초를 넘기면 로딩 화면에 새로고침 안내를 덧붙인다. 준비되면 타이머·문구 제거.
+let _loadingSlowTimer = setTimeout(() => {
+  if (document.getElementById('loading-slow')) return;
+  const p = document.createElement('p');
+  p.id = 'loading-slow';
+  p.textContent = '조금 오래 걸리네요. 새로고침 해보세요.';
+  p.style.color = 'var(--muted)';
+  p.style.fontSize = '13px';
+  document.getElementById('screen-loading').appendChild(p);
+}, 30000);
+function _clearLoadingSlow() {
+  clearTimeout(_loadingSlowTimer);
+  document.getElementById('loading-slow')?.remove();
+}
+
+// 페이지를 떠날 때 카메라를 확실히 끈다. beforeunload 는 iOS 에서 불안정하니
+// pagehide 도 함께 건다.
+window.addEventListener('beforeunload', stopCamera);
+window.addEventListener('pagehide', stopCamera);
+
+const ready = waitForCv().then(() => {
+  _clearLoadingSlow();
+  state.cvReady = true;
+  show('camera'); // show('camera')가 카메라 시작 + 라이브 루프까지 맡는다
+}).catch(err => {
+  _clearLoadingSlow();
+  document.querySelector('#screen-loading p').textContent =
+    '준비 중 문제가 생겼어요. 인터넷 연결을 확인하고 새로고침 해주세요.';
+  console.error(err);
+});
+
+/* ===== debug ===== */
+window.scanDebug = {
+  state, show, ready, get cv() { return window.cv; },
+  geometry: { orderCorners, isConvexQuad, outputSize, mapPoint },
+  startCamera, stopCamera, grabFrame, pickFile, downscaleCanvas, canvasFromImage,
+  detectCorners, defaultCorners,
+  startLiveLoop, stopLiveLoop, drawQuad, videoDisplayRect, _liveRunning,
+  openAdjust, readHandles, _setHandles,
+  extractPaper, addPage, removePage, movePage, setFilter, acceptAdjust, PAGE_LIMIT,
+  filters: { applyFilter, withMats },
+  downloadImages, downloadPdf, pageOutputCanvas, canvasToBlob, renderExport,
+};
+
+show('loading');
+</script>
 </body>
 </html>
