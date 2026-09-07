@@ -66,3 +66,46 @@ test.describe('geometry', () => {
     expect(r).toEqual({ x: 500, y: 500 });
   });
 });
+
+test.describe('camera', () => {
+  test('카메라가 시작되고 프레임을 캡처한다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.evaluate(() => window.scanDebug.startCamera());
+    await page.waitForFunction(() => {
+      const v = document.getElementById('cam-video');
+      return v && v.videoWidth > 0;
+    }, null, { timeout: 10000 });
+    const size = await page.evaluate(() => {
+      const c = window.scanDebug.grabFrame();
+      return { w: c.width, h: c.height };
+    });
+    expect(size.w).toBeGreaterThan(0);
+    expect(size.h).toBeGreaterThan(0);
+  });
+
+  test('파일 선택 경로: 이미지가 캔버스로 들어온다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.setInputFiles('#cam-file', 'tests/fixtures/paper-on-desk.jpg');
+    await page.waitForFunction(() => window.scanDebug.state.draft !== null, null, { timeout: 10000 });
+    const d = await page.evaluate(() => ({
+      w: window.scanDebug.state.draft.canvas.width,
+      h: window.scanDebug.state.draft.canvas.height,
+    }));
+    expect(d.w).toBe(1200);
+    expect(d.h).toBe(1600);
+  });
+
+  test('downscaleCanvas: 긴 변 상한 적용', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const r = await page.evaluate(() => {
+      const c = document.createElement('canvas'); c.width = 6000; c.height = 3000;
+      c.getContext('2d').fillRect(0, 0, 10, 10);
+      const out = window.scanDebug.downscaleCanvas(c, 3000);
+      return { w: out.width, h: out.height };
+    });
+    expect(r).toEqual({ w: 3000, h: 1500 });
+  });
+});
