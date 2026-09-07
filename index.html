@@ -199,6 +199,72 @@ function pickFile(file) {
   });
 }
 
+/* ===== detect ===== */
+const _scanner = new jscanify();
+
+function defaultCorners(w, h) {
+  const mx = w * 0.08, my = h * 0.08;
+  return {
+    topLeft: { x: mx, y: my },
+    topRight: { x: w - mx, y: my },
+    bottomRight: { x: w - mx, y: h - my },
+    bottomLeft: { x: mx, y: h - my },
+  };
+}
+
+// 사각형 넓이(신발끈 공식). ordered 코너 4점을 받는다.
+function _quadArea(c) {
+  const p = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+  let s = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = p[i], b = p[(i + 1) % 4];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(s) / 2;
+}
+
+function detectCorners(canvas) {
+  const small = downscaleCanvas(canvas, 3000);
+  const k = canvas.width / small.width;
+  let src = null, contour = null, cornerObj = null;
+  try {
+    src = cv.imread(small);
+    contour = _scanner.findPaperContour(src);
+    if (!contour) return null;
+    cornerObj = _scanner.getCornerPoints(contour);
+  } catch (e) {
+    console.warn('detect failed', e);
+    return null;
+  } finally {
+    // cv.imread 결과와 findPaperContour 반환 Mat은 반드시 해제(누수 시 장시간 사용에서 크래시)
+    src?.delete();
+    contour?.delete();
+  }
+  if (!cornerObj) return null;
+  const pts = [
+    cornerObj.topLeftCorner, cornerObj.topRightCorner,
+    cornerObj.bottomRightCorner, cornerObj.bottomLeftCorner,
+  ];
+  if (pts.some(p => !p || !isFinite(p.x) || !isFinite(p.y))) return null;
+  const scaled = pts.map(p => ({ x: p.x * k, y: p.y * k }));
+  const ordered = orderCorners(scaled);
+  const imgArea = canvas.width * canvas.height;
+  const area = _quadArea(ordered);
+  // 넓이가 이미지의 15% 미만이면 오검출로 간주
+  if (area < imgArea * 0.15) return null;
+  // 전체 프레임 가드: 종이가 없을 때 jscanify가 이미지 테두리 전체를 사각형으로
+  // 잡아내는 경우가 있다. 넓이가 이미지의 97%를 넘거나 네 모서리가 모두 이미지
+  // 꼭짓점에서 몇 px 안쪽이면 "종이 없음"(null)으로 본다.
+  const m = Math.max(4, canvas.width * 0.01, canvas.height * 0.01);
+  const atFrame =
+    ordered.topLeft.x <= m && ordered.topLeft.y <= m &&
+    ordered.topRight.x >= canvas.width - m && ordered.topRight.y <= m &&
+    ordered.bottomRight.x >= canvas.width - m && ordered.bottomRight.y >= canvas.height - m &&
+    ordered.bottomLeft.x <= m && ordered.bottomLeft.y >= canvas.height - m;
+  if (atFrame || area > imgArea * 0.97) return null;
+  return ordered;
+}
+
 /* ===== cvloader ===== */
 // opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
 // 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
@@ -269,6 +335,7 @@ window.scanDebug = {
   state, show, ready, get cv() { return window.cv; },
   geometry: { orderCorners, isConvexQuad, outputSize, mapPoint },
   startCamera, stopCamera, grabFrame, pickFile, downscaleCanvas, canvasFromImage,
+  detectCorners, defaultCorners,
 };
 
 show('loading');

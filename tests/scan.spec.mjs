@@ -109,3 +109,35 @@ test.describe('camera', () => {
     expect(r).toEqual({ w: 3000, h: 1500 });
   });
 });
+
+test.describe('detect', () => {
+  test('합성 사진에서 종이 네 모서리를 찾는다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const { got, truth } = await page.evaluate(async () => {
+      const res = await fetch('/tests/fixtures/paper-on-desk.jpg');
+      const blob = await res.blob();
+      const bmp = await createImageBitmap(blob);
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      c.getContext('2d').drawImage(bmp, 0, 0);
+      const truth = await (await fetch('/tests/fixtures/paper-on-desk.json')).json();
+      return { got: window.scanDebug.detectCorners(c), truth: truth.corners };
+    });
+    expect(got).not.toBeNull();
+    for (const k of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft']) {
+      expect(Math.hypot(got[k].x - truth[k].x, got[k].y - truth[k].y)).toBeLessThan(80);
+    }
+  });
+
+  test('종이 없는 사진이면 null', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const got = await page.evaluate(() => {
+      const c = document.createElement('canvas'); c.width = 400; c.height = 400;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#777'; ctx.fillRect(0, 0, 400, 400);
+      return window.scanDebug.detectCorners(c);
+    });
+    expect(got).toBeNull();
+  });
+});
