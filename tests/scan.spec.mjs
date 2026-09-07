@@ -317,6 +317,79 @@ test.describe('filters', () => {
   });
 });
 
+test.describe('robustness', () => {
+  test('카메라가 거부되면 안내 문구 + 파일 버튼으로 계속 사용 가능', async ({ page, context }) => {
+    await context.addInitScript(() => {
+      navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('denied', 'NotAllowedError'));
+    });
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await expect(page.locator('#cam-hint')).toContainText('사진 파일');
+    await expect(page.locator('#cam-shoot')).toBeDisabled();
+    await expect(page.locator('#cam-file-btn')).toHaveClass(/primary/);
+    await page.setInputFiles('#cam-file', 'tests/fixtures/paper-on-desk.jpg');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+  });
+
+  test('아주 큰 이미지도 검출 전 축소되어 처리된다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const ok = await page.evaluate(() => {
+      const c = document.createElement('canvas'); c.width = 6000; c.height = 8000;
+      const x = c.getContext('2d'); x.fillStyle = '#777'; x.fillRect(0, 0, 6000, 8000);
+      x.fillStyle = '#fff'; x.fillRect(600, 800, 4200, 6000);
+      const t0 = performance.now();
+      const r = window.scanDebug.detectCorners(c);
+      return { ms: performance.now() - t0, found: !!r };
+    });
+    expect(ok.ms).toBeLessThan(8000);
+  });
+
+  test('파일 선택 경로는 여전히 adjust 까지 도달한다 (revokeObjectURL 이 깨뜨리지 않음)', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    await page.setInputFiles('#cam-file', 'tests/fixtures/paper-on-desk.jpg');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+    const d = await page.evaluate(() => ({
+      w: window.scanDebug.state.draft.canvas.width,
+      h: window.scanDebug.state.draft.canvas.height,
+    }));
+    expect(d.w).toBe(1200);
+    expect(d.h).toBe(1600);
+  });
+
+  test('페이지가 없으면 downloadImages / downloadPdf 는 아무 일도 안 하고 예외도 없다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const r = await page.evaluate(async () => {
+      window.scanDebug.state.pages = [];
+      let threw = null;
+      try {
+        await window.scanDebug.downloadImages();
+        await window.scanDebug.downloadPdf();
+      } catch (e) { threw = String(e); }
+      return { threw };
+    });
+    expect(r.threw).toBeNull();
+  });
+
+  test('videoDisplayRect: 레터박스(가로/세로 여백) 계산', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const [pillar, letter, exact] = await page.evaluate(() => {
+      const f = window.scanDebug.videoDisplayRect;
+      return [
+        f(1000, 1000, 400, 800),  // 세로 비디오 → 좌우 여백
+        f(1000, 1000, 800, 400),  // 가로 비디오 → 상하 여백
+        f(800, 600, 400, 300),    // 비율 동일 → 여백 없음
+      ];
+    });
+    expect(pillar).toEqual({ x: 250, y: 0, width: 500, height: 1000 });
+    expect(letter).toEqual({ x: 0, y: 250, width: 1000, height: 500 });
+    expect(exact).toEqual({ x: 0, y: 0, width: 800, height: 600 });
+  });
+});
+
 test.describe('export', () => {
   async function buildPages(page, n) {
     await page.goto('/');
