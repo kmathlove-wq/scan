@@ -78,6 +78,52 @@ function showToast(msg, ms = 2200) {
   showToast._t = setTimeout(() => t.classList.remove('show'), ms);
 }
 
+/* ===== geometry ===== */
+function _dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function orderCorners(pts) {
+  const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const byDiff = [...pts].sort((a, b) => (a.x - a.y) - (b.x - b.y));
+  return {
+    topLeft: bySum[0],
+    bottomRight: bySum[3],
+    bottomLeft: byDiff[0],
+    topRight: byDiff[3],
+  };
+}
+
+function isConvexQuad(c) {
+  const p = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = p[i], b = p[(i + 1) % 4], d = p[(i + 2) % 4];
+    const cross = (b.x - a.x) * (d.y - b.y) - (b.y - a.y) * (d.x - b.x);
+    if (Math.abs(cross) < 1e-6) return false;
+    const s = Math.sign(cross);
+    if (sign === 0) sign = s;
+    else if (s !== sign) return false;
+  }
+  return true;
+}
+
+function outputSize(c) {
+  let w = Math.round(Math.max(_dist(c.topLeft, c.topRight), _dist(c.bottomLeft, c.bottomRight)));
+  let h = Math.round(Math.max(_dist(c.topLeft, c.bottomLeft), _dist(c.topRight, c.bottomRight)));
+  const longEdge = Math.max(w, h);
+  if (longEdge > 2000) {
+    const k = 2000 / longEdge;
+    w = Math.round(w * k); h = Math.round(h * k);
+  }
+  return { w, h };
+}
+
+function mapPoint(p, from, to) {
+  return {
+    x: to.x + (p.x - from.x) / from.width * to.width,
+    y: to.y + (p.y - from.y) / from.height * to.height,
+  };
+}
+
 /* ===== cvloader ===== */
 // opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
 // 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
@@ -142,7 +188,7 @@ const ready = waitForCv().then(() => {
 });
 
 /* ===== debug ===== */
-window.scanDebug = { state, show, ready, get cv() { return window.cv; } };
+window.scanDebug = { state, show, ready, get cv() { return window.cv; }, geometry: { orderCorners, isConvexQuad, outputSize, mapPoint } };
 
 show('loading');
 </script>
