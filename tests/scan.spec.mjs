@@ -316,3 +316,53 @@ test.describe('filters', () => {
     expect(ok).toBe(true);
   });
 });
+
+test.describe('export', () => {
+  async function buildPages(page, n) {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    for (let i = 0; i < n; i++) {
+      await page.evaluate(() => {
+        const c = document.createElement('canvas'); c.width = 400; c.height = 560;
+        const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 400, 560);
+        x.fillStyle = '#000'; for (let y = 40; y < 520; y += 40) x.fillRect(30, y, 300, 6);
+        window.scanDebug.addPage({ sourceDataURL: c.toDataURL('image/jpeg'), corners: null, warpedCanvas: c });
+      });
+    }
+    await page.evaluate(() => window.scanDebug.show('export'));
+  }
+
+  test('페이지 수만큼 썸네일이 보인다', async ({ page }) => {
+    await buildPages(page, 3);
+    await expect(page.locator('#exp-list .exp-item')).toHaveCount(3);
+  });
+
+  test('PDF 다운로드가 트리거되고 파일이 비어있지 않다', async ({ page }) => {
+    await buildPages(page, 2);
+    await page.selectOption('#exp-type', 'pdf');
+    const dl = await Promise.all([
+      page.waitForEvent('download'),
+      page.click('#exp-download'),
+    ]);
+    const path = await dl[0].path();
+    const fs = await import('node:fs');
+    expect(fs.statSync(path).size).toBeGreaterThan(1000);
+    expect(dl[0].suggestedFilename()).toBe('스캔.pdf');
+  });
+
+  test('1장 이미지 다운로드', async ({ page }) => {
+    await buildPages(page, 1);
+    const [dl] = await Promise.all([
+      page.waitForEvent('download'),
+      page.click('#exp-download'),
+    ]);
+    expect(dl.suggestedFilename()).toMatch(/^스캔\.(png|jpg)$/);
+  });
+
+  test('필터 버튼을 누르면 그 페이지 filter가 바뀐다', async ({ page }) => {
+    await buildPages(page, 1);
+    await page.click('#exp-list .exp-item:first-child [data-filter="bw"]');
+    const f = await page.evaluate(() => window.scanDebug.state.pages[0].filter);
+    expect(f).toBe('bw');
+  });
+});

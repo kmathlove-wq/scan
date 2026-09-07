@@ -56,9 +56,29 @@
   </div>
 </section>
 
-<section id="screen-export" class="screen" hidden>
-  <!-- Task 10에서 채움 -->
-  <div class="center" style="flex:1"><p>정리·저장 화면</p></div>
+<section id="screen-export" class="screen" hidden style="overflow:auto;">
+  <div style="padding:16px; display:flex; flex-direction:column; gap:16px;">
+    <h2 style="margin:0;">정리하고 저장하기</h2>
+    <div id="exp-list" style="display:flex; flex-direction:column; gap:16px;"></div>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+      <label>저장 형식
+        <select id="exp-type">
+          <option value="image">이미지</option>
+          <option value="pdf">PDF</option>
+        </select>
+      </label>
+      <label id="exp-format-wrap">그림 종류
+        <select id="exp-format">
+          <option value="png">PNG</option>
+          <option value="jpg">JPG</option>
+        </select>
+      </label>
+    </div>
+    <div style="display:flex; gap:12px;">
+      <button id="exp-new">새로 스캔 시작</button>
+      <button id="exp-download" class="primary" style="flex:1;">다운로드</button>
+    </div>
+  </div>
 </section>
 
 <div id="toast"></div>
@@ -105,6 +125,7 @@ async function show(name) {
 function render() {
   document.getElementById('cam-count').textContent = state.pages.length;
   document.getElementById('cam-done').disabled = state.pages.length === 0;
+  if (state.screen === 'export') renderExport();
 }
 
 function wireEvents() {
@@ -124,6 +145,17 @@ function wireEvents() {
     show('adjust');
   };
   document.getElementById('cam-done').onclick = () => show('export');
+
+  document.getElementById('exp-type').onchange = (e) => {
+    state.output.type = e.target.value; state.output._touched = true; renderExport();
+  };
+  document.getElementById('exp-format').onchange = (e) => { state.output.imageFormat = e.target.value; };
+  document.getElementById('exp-download').onclick = () => {
+    if (state.output.type === 'pdf') downloadPdf(); else downloadImages();
+  };
+  document.getElementById('exp-new').onclick = () => {
+    state.pages = []; state.output = { type: 'image', imageFormat: 'png' }; show('camera');
+  };
 
   document.getElementById('adj-retake').onclick = () => {
     state.draft = null; state.editingPageId = null; show('camera');
@@ -682,6 +714,98 @@ function applyFilter(canvas, name) {
   }
 }
 
+/* ===== exporter ===== */
+// 페이지의 최종 출력 캔버스(필터 적용 결과)를 만들어 page.filteredCanvas 에 캐시한다.
+// applyFilter 는 어떤 예외에도 원본 복사본을 돌려주므로 여기서 예외가 새지 않는다.
+function pageOutputCanvas(page) {
+  if (!page.filteredCanvas) page.filteredCanvas = applyFilter(page.warpedCanvas, page.filter);
+  return page.filteredCanvas;
+}
+
+function canvasToBlob(canvas, type = 'image/png', q) {
+  return new Promise((res) => canvas.toBlob(res, type, q));
+}
+
+// <a download> 로 파일 저장을 트리거한다(깃허브 페이지 = 실제 브라우저에서 동작).
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+async function downloadImages() {
+  const fmt = state.output.imageFormat;
+  const type = fmt === 'png' ? 'image/png' : 'image/jpeg';
+  const q = fmt === 'png' ? undefined : 0.9;
+  if (state.pages.length === 1) {
+    const blob = await canvasToBlob(pageOutputCanvas(state.pages[0]), type, q);
+    _triggerDownload(blob, `스캔.${fmt}`);
+    return;
+  }
+  for (let i = 0; i < state.pages.length; i++) {
+    const blob = await canvasToBlob(pageOutputCanvas(state.pages[i]), type, q);
+    _triggerDownload(blob, `스캔-${i + 1}.${fmt}`);
+    await new Promise(r => setTimeout(r, 400)); // 브라우저 다중 다운로드 간격
+  }
+}
+
+function downloadPdf() {
+  const { jsPDF } = window.jspdf;
+  let pdf = null;
+  state.pages.forEach((page, i) => {
+    const c = pageOutputCanvas(page);
+    const orient = c.width >= c.height ? 'l' : 'p';
+    if (i === 0) pdf = new jsPDF({ unit: 'px', format: [c.width, c.height], orientation: orient });
+    else pdf.addPage([c.width, c.height], orient);
+    pdf.addImage(c.toDataURL('image/jpeg', 0.85), 'JPEG', 0, 0, c.width, c.height);
+  });
+  pdf.save('스캔.pdf');
+}
+
+function renderExport() {
+  const list = document.getElementById('exp-list');
+  list.innerHTML = '';
+  state.pages.forEach((page, idx) => {
+    const item = document.createElement('div');
+    item.className = 'exp-item';
+    item.style.cssText = 'border:1px solid #333a4d; border-radius:10px; padding:12px; display:flex; gap:12px;';
+    const prev = pageOutputCanvas(page);
+    const thumb = document.createElement('canvas');
+    const tw = 120, th = Math.round(tw * prev.height / prev.width);
+    thumb.width = tw; thumb.height = th;
+    thumb.getContext('2d').drawImage(prev, 0, 0, tw, th);
+    item.appendChild(thumb);
+    const right = document.createElement('div');
+    right.style.cssText = 'flex:1; display:flex; flex-direction:column; gap:8px;';
+    right.innerHTML = `
+      <div style="display:flex; gap:6px; flex-wrap:wrap;">
+        ${[['original','원본'],['auto','자동보정'],['bw','흑백'],['gray','회색']].map(([v,l]) =>
+          `<button data-filter="${v}" style="${page.filter===v?'background:var(--accent);border-color:var(--accent);color:#fff;':''}">${l}</button>`).join('')}
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button data-act="up" ${idx===0?'disabled':''}>▲</button>
+        <button data-act="down" ${idx===state.pages.length-1?'disabled':''}>▼</button>
+        <button data-act="edit">다시 보정</button>
+        <button data-act="del" style="color:var(--danger);">삭제</button>
+      </div>`;
+    right.querySelectorAll('[data-filter]').forEach(b =>
+      b.onclick = () => setFilter(page.id, b.dataset.filter));
+    right.querySelector('[data-act=up]').onclick = () => movePage(page.id, -1);
+    right.querySelector('[data-act=down]').onclick = () => movePage(page.id, 1);
+    right.querySelector('[data-act=del]').onclick = () => removePage(page.id);
+    right.querySelector('[data-act=edit]').onclick = () => { state.editingPageId = page.id; show('adjust'); };
+    item.appendChild(right);
+    list.appendChild(item);
+  });
+  // 출력 옵션 상태 반영 — 여러 장이면서 사용자가 아직 안 건드렸으면 PDF 로 자동 전환
+  document.getElementById('exp-type').value = state.output.type =
+    (state.pages.length > 1 && state.output.type === 'image' && !state.output._touched) ? 'pdf' : state.output.type;
+  document.getElementById('exp-format-wrap').hidden = state.output.type !== 'image';
+  document.getElementById('exp-download').disabled = state.pages.length === 0;
+}
+
 /* ===== cvloader ===== */
 // opencv.js (docs.opencv.org 빌드)는 로드되면 전역 `cv` 를 정의하지만, WASM
 // 런타임이 준비되기 전에는 `cv.Mat` 같은 API 가 없다. 준비 완료는 `cv.Mat` 이
@@ -756,6 +880,7 @@ window.scanDebug = {
   openAdjust, readHandles, _setHandles,
   extractPaper, addPage, removePage, movePage, setFilter, acceptAdjust, PAGE_LIMIT,
   filters: { applyFilter, withMats },
+  downloadImages, downloadPdf, pageOutputCanvas, canvasToBlob, renderExport,
 };
 
 show('loading');
