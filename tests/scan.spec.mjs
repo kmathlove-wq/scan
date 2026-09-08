@@ -442,8 +442,8 @@ test.describe('export', () => {
 });
 
 test.describe('회귀 (C1/C2/I6)', () => {
-  test('C1: detectCorners 를 400회 반복해도 WASM 힙이 늘지 않는다', async ({ page }) => {
-    test.setTimeout(120_000); // 노이즈 프레임 detectCorners 는 ~55ms/회 (findContours 비용)
+  test('C1: detectCorners 를 800회 반복해도 WASM 힙이 늘지 않는다', async ({ page }) => {
+    test.setTimeout(120_000);
     await page.goto('/');
     await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
     const r = await page.evaluate(() => {
@@ -466,13 +466,13 @@ test.describe('회귀 (C1/C2/I6)', () => {
       x.fillStyle = '#efefef'; x.fillRect(110, 80, 420, 320); // 종이 비슷한 밝은 사각형
       for (let i = 0; i < 40; i++) window.scanDebug.detectCorners(c); // 워밍업
       const before = heap();
-      for (let i = 0; i < 400; i++) window.scanDebug.detectCorners(c);
+      for (let i = 0; i < 800; i++) window.scanDebug.detectCorners(c);
       const after = heap();
       return { before, after, mode: (cv.HEAP8 ? 'HEAP8' : cv.wasmMemory ? 'wasmMemory' : 'jsHeap') };
     });
     expect(r.before).not.toBeNull();
     // WASM 메모리는 한 번 커지면 줄지 않는다 — 컨투어 사본이 새면(누수분 ~0.25MB/회)
-    // 400회 동안 최소 수십 MB 증가한다. 정상이면 정확히 그대로.
+    // 800회 동안 최소 수십 MB 증가한다. 정상이면 정확히 그대로.
     expect(r.after).toBe(r.before);
   });
 
@@ -562,7 +562,7 @@ test.describe('회귀 (C1/C2/I6)', () => {
   });
 });
 
-test.describe('파비콘 + 감지 강화', () => {
+test.describe('파비콘', () => {
   test('파비콘이 심겨 있고 favicon.ico 요청이 없다', async ({ page }) => {
     let askedIco = false;
     page.on('request', (r) => { if (r.url().endsWith('/favicon.ico')) askedIco = true; });
@@ -574,20 +574,52 @@ test.describe('파비콘 + 감지 강화', () => {
     await page.waitForTimeout(600);
     expect(askedIco).toBe(false);
   });
+});
 
-  test('큰 어두운 사각형(거울 반사 흉내)이 있어도 종이를 고른다', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
-    const { got, truth } = await page.evaluate(async () => {
-      const bmp = await createImageBitmap(await (await fetch('/tests/fixtures/paper-with-decoy.jpg')).blob());
+test.describe('감지 v3 (테두리 기반)', () => {
+  async function detect(page, fixture) {
+    return page.evaluate(async (n) => {
+      const bmp = await createImageBitmap(await (await fetch('/tests/fixtures/' + n + '.jpg')).blob());
       const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
       c.getContext('2d').drawImage(bmp, 0, 0);
-      const truth = await (await fetch('/tests/fixtures/paper-with-decoy.json')).json();
-      return { got: window.scanDebug.detectCorners(c), truth: truth.corners };
-    });
-    expect(got).not.toBeNull();
-    for (const k of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft']) {
-      expect(Math.hypot(got[k].x - truth[k].x, got[k].y - truth[k].y)).toBeLessThan(120);
-    }
+      const truth = (await (await fetch('/tests/fixtures/' + n + '.json')).json()).corners;
+      const g = window.scanDebug.detectCorners(c);
+      if (!g) return { got: null };
+      const maxErr = Math.max(...['topLeft', 'topRight', 'bottomRight', 'bottomLeft']
+        .map((k) => Math.hypot(g[k].x - truth[k].x, g[k].y - truth[k].y)));
+      return { got: g, maxErr };
+    }, fixture);
+  }
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+  });
+
+  test('어두운 배경 위 종이를 정확히 찾는다', async ({ page }) => {
+    const r = await detect(page, 'paper-on-desk');
+    expect(r.got).not.toBeNull();
+    expect(r.maxErr).toBeLessThan(60);
+  });
+
+  test('종이보다 큰 반사면이 있어도 종이를 고른다', async ({ page }) => {
+    const r = await detect(page, 'paper-with-decoy');
+    expect(r.got).not.toBeNull();
+    expect(r.maxErr).toBeLessThan(60);
+  });
+
+  test('테두리 없는 하얀 그림 → 종이 없음(null)', async ({ page }) => {
+    expect((await detect(page, 'no-paper-drawing')).got).toBeNull();
+  });
+
+  test('화면 꽉 찬 스크린샷 흉내 → 종이 없음(null)', async ({ page }) => {
+    expect((await detect(page, 'no-paper-fullframe')).got).toBeNull();
+  });
+
+  test('종이를 못 찾으면 촬영 시 안내 토스트가 뜨고 보정 화면으로 간다', async ({ page }) => {
+    await page.setInputFiles('#cam-file', 'tests/fixtures/no-paper-drawing.jpg');
+    await expect(page.locator('#toast')).toHaveClass(/show/);
+    await expect(page.locator('#toast')).toContainText('종이를 찾지 못했어요');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
   });
 });
