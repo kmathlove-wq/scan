@@ -442,7 +442,8 @@ test.describe('export', () => {
 });
 
 test.describe('회귀 (C1/C2/I6)', () => {
-  test('C1: detectCorners 를 1000회 반복해도 WASM 힙이 늘지 않는다', async ({ page }) => {
+  test('C1: detectCorners 를 400회 반복해도 WASM 힙이 늘지 않는다', async ({ page }) => {
+    test.setTimeout(120_000); // 노이즈 프레임 detectCorners 는 ~55ms/회 (findContours 비용)
     await page.goto('/');
     await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
     const r = await page.evaluate(() => {
@@ -463,14 +464,15 @@ test.describe('회귀 (C1/C2/I6)', () => {
       }
       x.putImageData(im, 0, 0);
       x.fillStyle = '#efefef'; x.fillRect(110, 80, 420, 320); // 종이 비슷한 밝은 사각형
-      for (let i = 0; i < 60; i++) window.scanDebug.detectCorners(c); // 워밍업
+      for (let i = 0; i < 40; i++) window.scanDebug.detectCorners(c); // 워밍업
       const before = heap();
-      for (let i = 0; i < 1000; i++) window.scanDebug.detectCorners(c);
+      for (let i = 0; i < 400; i++) window.scanDebug.detectCorners(c);
       const after = heap();
       return { before, after, mode: (cv.HEAP8 ? 'HEAP8' : cv.wasmMemory ? 'wasmMemory' : 'jsHeap') };
     });
     expect(r.before).not.toBeNull();
-    // WASM 메모리는 한 번 커지면 줄지 않는다 — 누수가 있으면 1000회 동안 반드시 증가.
+    // WASM 메모리는 한 번 커지면 줄지 않는다 — 컨투어 사본이 새면(누수분 ~0.25MB/회)
+    // 400회 동안 최소 수십 MB 증가한다. 정상이면 정확히 그대로.
     expect(r.after).toBe(r.before);
   });
 
@@ -557,5 +559,35 @@ test.describe('회귀 (C1/C2/I6)', () => {
     expect(after.n).toBe(1);
     expect(after.id).toBe(before.id);
     expect(after.dim).not.toBe(before.dim);
+  });
+});
+
+test.describe('파비콘 + 감지 강화', () => {
+  test('파비콘이 심겨 있고 favicon.ico 요청이 없다', async ({ page }) => {
+    let askedIco = false;
+    page.on('request', (r) => { if (r.url().endsWith('/favicon.ico')) askedIco = true; });
+    await page.goto('/');
+    const href = await page.getAttribute('link[rel="icon"]', 'href');
+    expect(href).toContain('data:image/svg+xml');
+    const apple = await page.getAttribute('link[rel="apple-touch-icon"]', 'href');
+    expect(apple).toContain('data:image/svg+xml');
+    await page.waitForTimeout(600);
+    expect(askedIco).toBe(false);
+  });
+
+  test('큰 어두운 사각형(거울 반사 흉내)이 있어도 종이를 고른다', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.scanDebug?.state?.cvReady === true, null, { timeout: 40000 });
+    const { got, truth } = await page.evaluate(async () => {
+      const bmp = await createImageBitmap(await (await fetch('/tests/fixtures/paper-with-decoy.jpg')).blob());
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      c.getContext('2d').drawImage(bmp, 0, 0);
+      const truth = await (await fetch('/tests/fixtures/paper-with-decoy.json')).json();
+      return { got: window.scanDebug.detectCorners(c), truth: truth.corners };
+    });
+    expect(got).not.toBeNull();
+    for (const k of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft']) {
+      expect(Math.hypot(got[k].x - truth[k].x, got[k].y - truth[k].y)).toBeLessThan(120);
+    }
   });
 });

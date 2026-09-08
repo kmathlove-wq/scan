@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>스캔</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20x='6'%20y='4'%20width='20'%20height='24'%20rx='3'%20fill='%234c8dff'/%3E%3Cpath%20d='M11%209h5M11%209v5'%20stroke='white'%20stroke-width='2'%20fill='none'%20stroke-linecap='round'/%3E%3Cpath%20d='M21%2023h-5M21%2023v-5'%20stroke='white'%20stroke-width='2'%20fill='none'%20stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20fill='%230f1115'/%3E%3Crect%20x='6'%20y='4'%20width='20'%20height='24'%20rx='3'%20fill='%234c8dff'/%3E%3Cpath%20d='M11%209h5M11%209v5'%20stroke='white'%20stroke-width='2'%20fill='none'%20stroke-linecap='round'/%3E%3Cpath%20d='M21%2023h-5M21%2023v-5'%20stroke='white'%20stroke-width='2'%20fill='none'%20stroke-linecap='round'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="스캔">
 <style>
   :root { --bg:#0f1115; --fg:#e8eaed; --muted:#9aa0a6; --accent:#4c8dff; --danger:#ff5c5c; }
   * { box-sizing: border-box; }
@@ -331,10 +336,15 @@ function _quadArea(c) {
   return Math.abs(s) / 2;
 }
 
-// 가장 큰 컨투어(=종이 후보)를 앱 안에서 직접 찾는다. jscanify 1.4.0 의
-// findPaperContour 는 루프 안 `contours.get(i)` 사본을 지우지 않아 실시간 루프에서
-// WASM 힙이 무한히 샌다. 여기서는 채택 안 된 사본을 매번 즉시 delete 하고,
-// 살아남은 best 만 호출자(withMats track)가 최종 해제한다.
+// 종이 후보 컨투어를 앱 안에서 직접 찾는다. jscanify 1.4.0 의 findPaperContour 는
+// 루프 안 `contours.get(i)` 사본을 지우지 않아 실시간 루프에서 WASM 힙이 무한히 샌다.
+//
+// 단순히 "가장 큰 사각형"을 고르면 거울·유리처럼 반사가 있는 배경에서 종이가 아니라
+// 반사된 액자/거울테두리/다른 물건을 잡는다. 그래서 넓이 밴드(10~98%) 안에 후보가
+// 둘 이상이면 "안쪽 밝기"로 고른다 — 종이는 하얗고 균일, 반사·테두리는 어둡거나 잡다함.
+// 후보가 하나뿐이면 그냥 그걸 쓰고(빠른 길), 밴드가 비면 종전처럼 가장 큰 컨투어로
+// 폴백한다(더 나빠지지 않음). 채택 안 된 사본은 즉시 delete, 살아남은 것만
+// 호출자(withMats track)가 최종 해제.
 function _findPaperContour(srcMat, track) {
   const gray = track(new cv.Mat());
   if (srcMat.channels() > 1) cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
@@ -344,14 +354,48 @@ function _findPaperContour(srcMat, track) {
   const th = track(new cv.Mat()); cv.threshold(blur, th, 0, 255, cv.THRESH_OTSU);
   const cs = track(new cv.MatVector()), hi = track(new cv.Mat());
   cv.findContours(th, cs, hi, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
-  let best = null, bestArea = 0;
+
+  const imgArea = gray.rows * gray.cols;
+  const LO = imgArea * 0.10, HI = imgArea * 0.98;
+  let biggest = null, biggestArea = -1, biggestInBand = false;
+  const band = [];                    // 넓이 밴드(10~98%) 안 후보 { ci, area }
   for (let i = 0; i < cs.size(); i++) {
     const ci = cs.get(i);
-    const a = cv.contourArea(ci);
-    if (a > bestArea) { bestArea = a; if (best) best.delete(); best = ci; }
-    else ci.delete();
+    const area = cv.contourArea(ci);
+    const inBand = area >= LO && area <= HI;
+    if (inBand) band.push({ ci, area });
+    if (area > biggestArea) {
+      if (biggest && !biggestInBand) biggest.delete();  // 밴드에 없던 옛 최대치만 해제
+      biggest = ci; biggestArea = area; biggestInBand = inBand;
+    } else if (!inBand) {
+      ci.delete();
+    }
   }
-  return best; // withMats track 이 최종 delete
+
+  let chosen;
+  if (band.length === 0) {
+    chosen = biggest;                 // 밴드 비면 폴백: 전체 최대 컨투어
+  } else {
+    // 큰 것부터 최대 6개만 밝기 평가(성능). 종이는 밝고 균일, 반사·테두리는 어둡다.
+    band.sort((a, b) => b.area - a.area);
+    for (const c of band.slice(6)) c.ci.delete();
+    const cand = band.slice(0, 6);
+    if (cand.length === 1) {
+      chosen = cand[0].ci;
+    } else {
+      let bestScore = -Infinity;
+      for (const c of cand) {
+        const roi = gray.roi(cv.boundingRect(c.ci));
+        const score = cv.mean(roi)[0] + (c.area / imgArea) * 40;
+        roi.delete();
+        if (score > bestScore) { bestScore = score; chosen = c.ci; }
+      }
+    }
+    for (const c of cand) if (c.ci !== chosen) c.ci.delete();
+    if (biggest && !biggestInBand) biggest.delete();  // 밴드 밖 최대치는 이제 불필요
+  }
+
+  return chosen || null;              // withMats track 이 최종 delete
 }
 
 function detectCorners(canvas) {
