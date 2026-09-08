@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const W = 1200, H = 1600;
 
-// 종이 정답 모서리 (기울어진 사다리꼴) — 종이가 들어가는 픽스처는 이 위치를 쓴다.
+// 반듯한 종이 정답 모서리 (기울어진 사다리꼴).
 const corners = {
   topLeft:     { x: 210, y: 190 },
   topRight:    { x: 980, y: 250 },
@@ -14,17 +14,13 @@ const corners = {
   bottomLeft:  { x: 170, y: 1330 },
 };
 
-const drawPaper = `
-ctx.fillStyle = '#f7f5f0';
-ctx.beginPath();
-ctx.moveTo(k.topLeft.x, k.topLeft.y);
-ctx.lineTo(k.topRight.x, k.topRight.y);
-ctx.lineTo(k.bottomRight.x, k.bottomRight.y);
-ctx.lineTo(k.bottomLeft.x, k.bottomLeft.y);
-ctx.closePath(); ctx.fill();
-ctx.strokeStyle = '#8892a0'; ctx.lineWidth = 6;
-for (let y=340; y<1300; y+=70){ ctx.beginPath(); ctx.moveTo(280, y); ctx.lineTo(880 - (y*0.02), y); ctx.stroke(); }
-`;
+// 어려운 실제 사진 흉내용 종이 모서리 (더 크게 회전 + 원근).
+const hardCorners = {
+  topLeft:     { x: 380, y: 210 },
+  topRight:    { x: 760, y: 300 },
+  bottomRight: { x: 690, y: 1330 },
+  bottomLeft:  { x: 250, y: 1180 },
+};
 
 const noise = (n, alpha) => `
 for (let i=0;i<${n};i++){
@@ -32,17 +28,27 @@ for (let i=0;i<${n};i++){
   ctx.fillRect(Math.random()*${W}, Math.random()*${H}, 2, 2);
 }`;
 
-// 각 픽스처: canvas 를 그리는 <script> 조각.
+const drawPaper = (k) => `
+ctx.fillStyle = '#f7f5f0';
+ctx.beginPath();
+ctx.moveTo(${k.topLeft.x}, ${k.topLeft.y});
+ctx.lineTo(${k.topRight.x}, ${k.topRight.y});
+ctx.lineTo(${k.bottomRight.x}, ${k.bottomRight.y});
+ctx.lineTo(${k.bottomLeft.x}, ${k.bottomLeft.y});
+ctx.closePath(); ctx.fill();
+ctx.strokeStyle = '#8892a0'; ctx.lineWidth = 6;
+for (let y=340; y<1300; y+=70){ ctx.beginPath(); ctx.moveTo(280, y); ctx.lineTo(880 - (y*0.02), y); ctx.stroke(); }
+`;
+
+// name -> { body, corners|null }
 const FIXTURES = {
-  // 어두운 책상 위 흰 종이 — 검출돼야 정상.
-  'paper-on-desk': `
+  'paper-on-desk': { corners, body: `
     ctx.fillStyle = '#4a4038'; ctx.fillRect(0,0,${W},${H});
     ${noise(40000, 0.06)}
-    ${drawPaper}
-  `,
-  // 종이보다 큰 어두운 "반사면"(모서리가 둥글어 4각형이 아님) + 반사 클러터.
-  // → 4점 사각형이 아니라 후보 탈락, 종이가 선택돼야 정상.
-  'paper-with-decoy': `
+    ${drawPaper(corners)}
+  ` },
+
+  'paper-with-decoy': { corners, body: `
     ctx.fillStyle = '#4a4038'; ctx.fillRect(0,0,${W},${H});
     ${noise(20000, 0.05)}
     ctx.fillStyle = '#20202a';
@@ -53,10 +59,53 @@ const FIXTURES = {
       ctx.moveTo(120+Math.random()*960, 120+Math.random()*1380);
       ctx.lineTo(120+Math.random()*960, 120+Math.random()*1380); ctx.stroke();
     }
-    ${drawPaper}
-  `,
-  // 테두리 없는 하얀 그림 (불규칙한 검은 형체) — 종이 없음(null)이어야 정상.
-  'no-paper-drawing': `
+    ${drawPaper(corners)}
+  ` },
+
+  // 어려운 실제 사진 흉내: 어두운 배경 / ~13° 회전+원근 / 위아래 봉이 옆으로 삐져나옴 /
+  // 굵은 붓글씨가 종이 가장자리까지 닿음 / 오른쪽 위에 어두운 그릇. minAreaRect 대체로 잡혀야.
+  'paper-hard': { corners: hardCorners, body: `
+    const k = ${JSON.stringify(hardCorners)};
+    ctx.fillStyle = '#1b1f33'; ctx.fillRect(0,0,${W},${H});
+    ${noise(30000, 0.05)}
+    ctx.fillStyle = '#c33'; ctx.beginPath(); ctx.arc(120, 900, 8, 0, 7); ctx.fill();  // 책상 위 빨간 점
+    // 종이
+    ctx.fillStyle = '#f2efe6';
+    ctx.beginPath();
+    ctx.moveTo(k.topLeft.x, k.topLeft.y); ctx.lineTo(k.topRight.x, k.topRight.y);
+    ctx.lineTo(k.bottomRight.x, k.bottomRight.y); ctx.lineTo(k.bottomLeft.x, k.bottomLeft.y);
+    ctx.closePath(); ctx.fill();
+    // 위/아래 금속 봉 (종이보다 옆으로 ~55px 삐져나옴)
+    const roller = (x1,y1,x2,y2) => {
+      const dx=x2-x1, dy=y2-y1, L=Math.hypot(dx,dy), ux=dx/L, uy=dy/L, nx=-uy, ny=ux;
+      const ex1=x1-ux*55, ey1=y1-uy*55, ex2=x2+ux*55, ey2=y2+uy*55, t=17;
+      ctx.fillStyle='#b9bcc4'; ctx.beginPath();
+      ctx.moveTo(ex1-nx*t, ey1-ny*t); ctx.lineTo(ex2-nx*t, ey2-ny*t);
+      ctx.lineTo(ex2+nx*t, ey2+ny*t); ctx.lineTo(ex1+nx*t, ey1+ny*t); ctx.closePath(); ctx.fill();
+    };
+    roller(k.topLeft.x, k.topLeft.y, k.topRight.x, k.topRight.y);
+    roller(k.bottomLeft.x, k.bottomLeft.y, k.bottomRight.x, k.bottomRight.y);
+    // 굵은 붓글씨 (종이 안쪽으로 클립, 일부는 가장자리에 닿게)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(k.topLeft.x, k.topLeft.y); ctx.lineTo(k.topRight.x, k.topRight.y);
+    ctx.lineTo(k.bottomRight.x, k.bottomRight.y); ctx.lineTo(k.bottomLeft.x, k.bottomLeft.y);
+    ctx.closePath(); ctx.clip();
+    ctx.strokeStyle='#14161f'; ctx.lineCap='round';
+    for (let i=0;i<26;i++){
+      ctx.lineWidth = 14 + Math.random()*34;
+      ctx.beginPath();
+      ctx.moveTo(230+Math.random()*560, 240+Math.random()*1050);
+      ctx.lineTo(230+Math.random()*560, 240+Math.random()*1050);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // 오른쪽 위 어두운 그릇 (종이 밖, 실제 사진처럼 살짝 떨어져 있음)
+    ctx.fillStyle='#10121c'; ctx.beginPath(); ctx.ellipse(950, 210, 120, 90, 0.2, 0, 7); ctx.fill();
+    ctx.strokeStyle='#dfe2ea'; ctx.lineWidth=6; ctx.stroke();
+  ` },
+
+  'no-paper-drawing': { corners: null, body: `
     ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,${W},${H});
     ctx.fillStyle = '#111'; ctx.beginPath();
     const cx=600, cy=800; ctx.moveTo(cx+300, cy);
@@ -64,34 +113,29 @@ const FIXTURES = {
       ctx.lineTo(cx+Math.cos(a)*r, cy+Math.sin(a)*r); }
     ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#fff';
-    ctx.beginPath(); ctx.arc(520, 720, 40, 0, Math.PI*2); ctx.arc(690, 720, 40, 0, Math.PI*2); ctx.fill();
-  `,
-  // 화면 꽉 찬 스크린샷 흉내: 잔글씨·작은 상자만 빽빽, 큰 사각형 없음 — null 이어야 정상.
-  'no-paper-fullframe': `
+    ctx.beginPath(); ctx.arc(520, 720, 40, 0, 7); ctx.arc(690, 720, 40, 0, 7); ctx.fill();
+  ` },
+
+  'no-paper-fullframe': { corners: null, body: `
     ctx.fillStyle = '#e8e8ec'; ctx.fillRect(0,0,${W},${H});
-    ctx.fillStyle = '#c8c8d0'; ctx.fillRect(0,0,${W},110);           // 상단바 (테두리 붙음)
+    ctx.fillStyle = '#c8c8d0'; ctx.fillRect(0,0,${W},110);
     ctx.fillStyle = '#555';
-    for (let y=170; y<${H}-40; y+=54){
-      const wln = 300 + Math.random()*760;
-      ctx.fillRect(60, y, wln, 14);
-    }
+    for (let y=170; y<${H}-40; y+=54){ ctx.fillRect(60, y, 300 + Math.random()*760, 14); }
     for (let i=0;i<40;i++){
       ctx.strokeStyle = '#aab'; ctx.lineWidth = 2;
-      const x=60+Math.random()*1000, y=150+Math.random()*1380, w=40+Math.random()*120, h=30+Math.random()*80;
-      ctx.strokeRect(x, y, w, h);
+      ctx.strokeRect(60+Math.random()*1000, 150+Math.random()*1380, 40+Math.random()*120, 30+Math.random()*80);
     }
-  `,
+  ` },
 };
 
 const html = (body) => `<!doctype html><canvas id="c" width="${W}" height="${H}"></canvas><script>
 const ctx = c.getContext('2d');
-const k = ${JSON.stringify(corners)};
 ${body}
 window.__png = c.toDataURL('image/jpeg', 0.92);
 </script>`;
 
 const browser = await chromium.launch();
-for (const [name, body] of Object.entries(FIXTURES)) {
+for (const [name, { body, corners: k }] of Object.entries(FIXTURES)) {
   const page = await browser.newPage();
   await page.setContent(html(body));
   await page.waitForFunction(() => typeof window.__png === 'string');
@@ -100,7 +144,7 @@ for (const [name, body] of Object.entries(FIXTURES)) {
   fs.writeFileSync(path.join(dir, `${name}.jpg`), Buffer.from(dataUrl.split(',')[1], 'base64'));
   fs.writeFileSync(
     path.join(dir, `${name}.json`),
-    JSON.stringify({ width: W, height: H, corners }, null, 2),
+    JSON.stringify({ width: W, height: H, corners: k }, null, 2),
   );
   console.log(`fixture written: ${name}.jpg`);
 }

@@ -576,7 +576,7 @@ test.describe('파비콘', () => {
   });
 });
 
-test.describe('감지 v3 (테두리 기반)', () => {
+test.describe('감지 v4 (테두리 + Otsu, minAreaRect 대체)', () => {
   async function detect(page, fixture) {
     return page.evaluate(async (n) => {
       const bmp = await createImageBitmap(await (await fetch('/tests/fixtures/' + n + '.jpg')).blob());
@@ -606,6 +606,13 @@ test.describe('감지 v3 (테두리 기반)', () => {
     const r = await detect(page, 'paper-with-decoy');
     expect(r.got).not.toBeNull();
     expect(r.maxErr).toBeLessThan(60);
+  });
+
+  test('어려운 사진(회전+원근+봉 삐져나옴+획이 가장자리에 닿음)도 대충 잡는다', async ({ page }) => {
+    const r = await detect(page, 'paper-hard');
+    expect(r.got).not.toBeNull();
+    // 봉이 옆으로 삐져나온 만큼(~55px) 오차가 나는 건 정상 — 사용자가 손으로 조정.
+    expect(r.maxErr).toBeLessThan(130);
   });
 
   test('테두리 없는 하얀 그림 → 종이 없음(null)', async ({ page }) => {

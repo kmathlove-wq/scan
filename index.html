@@ -338,17 +338,24 @@ function _quadArea(c) {
 }
 
 // 검출된 사각형이 "촬영된 문서"로서 말이 되는지 기하 검사.
-//   - 넓이 10~92%   - 종횡비 5:1 이내
+//   - 넓이 6~93%   - 종횡비 6:1 이내
 //   - 네 꼭짓점이 전부 이미지 꼭짓점 근처면 탈락(프레임 자체)
 //   - 사각형 변 중 이미지 테두리를 따라 붙은 게 3개 이상이면(화면 꽉 참) 탈락
 function _quadPlausible(q, W, H) {
   const imgArea = W * H;
   const area = _quadArea(q);
-  if (area < imgArea * 0.10 || area > imgArea * 0.92) return false;
+  if (area < imgArea * 0.06 || area > imgArea * 0.93) return false;
 
-  const w = (_dist(q.topLeft, q.topRight) + _dist(q.bottomLeft, q.bottomRight)) / 2;
-  const h = (_dist(q.topLeft, q.bottomLeft) + _dist(q.topRight, q.bottomRight)) / 2;
-  if (Math.min(w, h) < 1 || Math.max(w, h) / Math.min(w, h) > 5) return false;
+  // 네 변 중 하나라도 지나치게 짧으면(=삼각형처럼 찌그러짐) 탈락.
+  const el = [
+    _dist(q.topLeft, q.topRight), _dist(q.topRight, q.bottomRight),
+    _dist(q.bottomRight, q.bottomLeft), _dist(q.bottomLeft, q.topLeft),
+  ];
+  if (Math.min(...el) < Math.min(W, H) * 0.06) return false;
+
+  const w = (el[0] + el[2]) / 2;
+  const h = (el[1] + el[3]) / 2;
+  if (Math.min(w, h) < 1 || Math.max(w, h) / Math.min(w, h) > 6) return false;
 
   const m = Math.max(6, Math.min(W, H) * 0.02);
   const near = (p) => ({ L: p.x <= m, R: p.x >= W - m, T: p.y <= m, B: p.y >= H - m });
@@ -362,72 +369,138 @@ function _quadPlausible(q, W, H) {
   return borderEdges < 3;
 }
 
-// 사각형 네 변을 따라 실제 경계선(에지)이 있는지 비율로. 하얀 그림/스크린샷처럼
-// "테두리 없는" 이미지는 변 위에 에지가 거의 없어 낮게 나온다(→ 종이 아님).
-// edgesMat: 팽창된 Canny 결과(CV_8UC1).
+// 사각형 네 변을 따라 실제 경계선(에지)이 얼마나 있는지 0~1. 팽창된 에지맵에서 각
+// 샘플 지점 주변 ±2px 안에 에지가 있으면 hit. 하얀 그림·스크린샷은 낮게 나온다.
 function _edgeSupport(edgesMat, q) {
   const pts = [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
   const W = edgesMat.cols, H = edgesMat.rows;
   let hit = 0, total = 0;
   for (let e = 0; e < 4; e++) {
     const a = pts[e], b = pts[(e + 1) % 4];
-    for (let s = 0; s <= 28; s++) {
-      const t = s / 28;
-      const x = Math.round(a.x + (b.x - a.x) * t);
-      const y = Math.round(a.y + (b.y - a.y) * t);
-      if (x < 0 || y < 0 || x >= W || y >= H) continue;
+    for (let s = 0; s <= 30; s++) {
+      const t = s / 30;
+      const cx = Math.round(a.x + (b.x - a.x) * t);
+      const cy = Math.round(a.y + (b.y - a.y) * t);
       total++;
-      if (edgesMat.ucharPtr(y, x)[0] !== 0) hit++;
+      let ok = false;
+      for (let dy = -2; dy <= 2 && !ok; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const x = cx + dx, y = cy + dy;
+          if (x >= 0 && y >= 0 && x < W && y < H && edgesMat.ucharPtr(y, x)[0] !== 0) { ok = true; break; }
+        }
+      }
+      if (ok) hit++;
     }
   }
   return total ? hit / total : 0;
 }
 
-// 종이 사각형을 찾는다. "가장 큰 사각형"이 아니라 "촬영된 문서처럼 생긴 것"을 고른다:
-// 외곽선(RETR_EXTERNAL)을 단순화해 꼭짓점 4개 + 볼록 + 기하 타당(_quadPlausible) +
-// 변에 실제 경계선 존재(_edgeSupport>0.5)를 전부 만족하는 후보 중 가장 큰 것.
-// 하나도 없으면 null(= 종이 없음). 반환값은 small 이미지 좌표계의 정렬된 네 점.
+// 회전 직사각형(minAreaRect 결과)의 네 꼭짓점.
+function _rectCorners(rr) {
+  const rad = rr.angle * Math.PI / 180, co = Math.cos(rad), si = Math.sin(rad);
+  const hw = rr.size.width / 2, hh = rr.size.height / 2;
+  return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => ({
+    x: rr.center.x + x * co - y * si, y: rr.center.y + x * si + y * co,
+  }));
+}
+
+// 무순서 네 점을 TL/TR/BR/BL 로. 무게중심 기준 각도로 시계방향 정렬한 뒤
+// (x+y) 최소를 TL 시작점으로 삼는다. orderCorners 의 합/차 방식은 45° 부근
+// 회전에서 같은 점을 두 번 뽑아 삼각형이 되는데, 이 방식은 그렇지 않다.
+function _orderQuad(pts) {
+  const cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
+  const cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
+  const cw = [...pts].sort((a, b) =>
+    Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  let s = 0;
+  for (let i = 1; i < 4; i++) if (cw[i].x + cw[i].y < cw[s].x + cw[s].y) s = i;
+  const o = [0, 1, 2, 3].map((i) => cw[(s + i) % 4]);
+  return { topLeft: o[0], topRight: o[1], bottomRight: o[2], bottomLeft: o[3] };
+}
+
+// 한 컨투어에서 "문서 사각형" 후보를 뽑는다. 여러 강도로 다각형 근사해 꼭짓점 4개가
+// 나오면 그걸, 안 나오면(봉이 삐져나오거나 모서리가 가려진 실제 사진) minAreaRect
+// (외곽선에 가장 잘 맞는 기울어진 직사각형)로 대체하되 외곽선이 그 직사각형을 58%
+// 이상 채울 때만 인정한다. 반환: 정렬된 네 점 또는 null.
+function _quadFromContour(ci, W, H) {
+  const peri = cv.arcLength(ci, true);
+  for (const f of [0.02, 0.04, 0.06, 0.09]) {
+    const ap = new cv.Mat();
+    cv.approxPolyDP(ci, ap, f * peri, true);
+    let q = null;
+    if (ap.rows === 4 && cv.isContourConvex(ap)) {
+      const d = ap.data32S;
+      q = _orderQuad([
+        { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
+        { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
+      ]);
+    }
+    ap.delete();
+    if (q && _quadPlausible(q, W, H)) return q;
+  }
+  const rr = cv.minAreaRect(ci);
+  const rectArea = rr.size.width * rr.size.height;
+  if (rectArea > 1 && cv.contourArea(ci) / rectArea >= 0.58) {
+    const q = _orderQuad(_rectCorners(rr));
+    if (_quadPlausible(q, W, H)) return q;
+  }
+  return null;
+}
+
+// 종이 사각형을 찾는다. Otsu 이진화 + Canny 두 경로로 외곽선(RETR_EXTERNAL)을 모아
+// 큰 것부터 _quadFromContour 로 사각형을 만들고, 변에 실제 경계선이 충분히(≥0.3)
+// 있는 것 중 (경계선 지지도 + 약간의 넓이 가점) 최고점을 고른다. 없으면 null.
+// 반환값은 small 이미지 좌표계의 정렬된 네 점.
 // jscanify.findPaperContour 는 내부 `contours.get(i)` 사본을 안 지워 누수라 안 쓴다.
 function _findPaperQuad(src, track) {
   const gray = track(new cv.Mat());
   if (src.channels() > 1) cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   else src.copyTo(gray);
   const g = track(new cv.Mat()); cv.GaussianBlur(gray, g, new cv.Size(5, 5), 0);
-  const edges = track(new cv.Mat()); cv.Canny(g, edges, 75, 200);
-  const kernel = track(cv.Mat.ones(3, 3, cv.CV_8U));
-  cv.dilate(edges, edges, kernel, new cv.Point(-1, -1), 2);
-
-  const cs = track(new cv.MatVector()), hi = track(new cv.Mat());
-  cv.findContours(edges, cs, hi, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
   const W = gray.cols, H = gray.rows, imgArea = W * H;
-  const items = [];
-  for (let i = 0; i < cs.size(); i++) {
-    const ci = cs.get(i);
-    items.push({ ci, a: cv.contourArea(ci) });
-  }
-  items.sort((x, y) => y.a - x.a);
-  for (const it of items.slice(8)) it.ci.delete();   // 큰 것 8개만 검사
-  const top = items.slice(0, 8);
 
-  let found = null;
+  // 경로 1: Canny + 팽창 — 저대비·질감 배경에 강함. edgeSupport 판정에도 쓴다.
+  const edges = track(new cv.Mat()); cv.Canny(g, edges, 50, 160);
+  const k3 = track(cv.Mat.ones(3, 3, cv.CV_8U));
+  cv.dilate(edges, edges, k3, new cv.Point(-1, -1), 2);
+
+  // 경로 2: Otsu 이진화 + 큰 닫힘 — 흰 종이 vs 어두운 배경 같은 고대비에 강함.
+  // 종이를 가로지르는 굵은 붓글씨가 흰 영역을 조각내므로, 획 폭(~이미지/22)보다 큰
+  // 커널로 닫아 한 덩어리로 되살린다.
+  const bin = track(new cv.Mat());
+  cv.threshold(g, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+  const ks = Math.max(9, Math.round(Math.min(W, H) / 22)) | 1;
+  const kBig = track(cv.Mat.ones(ks, ks, cv.CV_8U));
+  cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kBig);
+
+  const items = [];
+  const collect = (mat) => {
+    const cs = track(new cv.MatVector()), hi = track(new cv.Mat());
+    cv.findContours(mat, cs, hi, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    for (let i = 0; i < cs.size(); i++) {
+      const ci = cs.get(i);
+      const a = cv.contourArea(ci);
+      if (a / imgArea >= 0.06 && a / imgArea <= 0.96) items.push({ ci, a });
+      else ci.delete();
+    }
+  };
+  collect(edges);
+  collect(bin);
+  items.sort((x, y) => y.a - x.a);
+  for (const it of items.slice(10)) it.ci.delete();
+  const top = items.slice(0, 10);
+
+  let best = null, bestScore = 0;
   for (const it of top) {
-    if (!found && it.a / imgArea >= 0.10 && it.a / imgArea <= 0.95) {
-      const approx = new cv.Mat();
-      cv.approxPolyDP(it.ci, approx, 0.02 * cv.arcLength(it.ci, true), true);
-      if (approx.rows === 4 && cv.isContourConvex(approx)) {
-        const d = approx.data32S;
-        const q = orderCorners([
-          { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
-          { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
-        ]);
-        if (_quadPlausible(q, W, H) && _edgeSupport(edges, q) > 0.5) found = q;
-      }
-      approx.delete();
+    const q = _quadFromContour(it.ci, W, H);
+    if (q) {
+      const sup = _edgeSupport(edges, q);
+      const score = sup + (it.a / imgArea) * 0.15;
+      if (sup >= 0.30 && score > bestScore) { bestScore = score; best = q; }
     }
   }
   for (const it of top) it.ci.delete();
-  return found;
+  return best;
 }
 
 function detectCorners(canvas) {
@@ -441,12 +514,15 @@ function detectCorners(canvas) {
     return null;
   }
   if (!quad) return null;
-  return orderCorners([
-    { x: quad.topLeft.x * k, y: quad.topLeft.y * k },
-    { x: quad.topRight.x * k, y: quad.topRight.y * k },
-    { x: quad.bottomRight.x * k, y: quad.bottomRight.y * k },
-    { x: quad.bottomLeft.x * k, y: quad.bottomLeft.y * k },
-  ]);
+  // _findPaperQuad 가 이미 TL/TR/BR/BL 로 정렬해 돌려준다 — 배율만 되돌린다.
+  // (orderCorners 의 합/차 방식은 회전 사각형에서 코너를 겹쳐 삼각형을 만든다.)
+  const scale = (p) => ({ x: p.x * k, y: p.y * k });
+  return {
+    topLeft: scale(quad.topLeft),
+    topRight: scale(quad.topRight),
+    bottomRight: scale(quad.bottomRight),
+    bottomLeft: scale(quad.bottomLeft),
+  };
 }
 
 /* ===== livepreview ===== */
