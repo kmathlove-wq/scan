@@ -3,12 +3,14 @@
 종이·문서를 카메라로 찍으면 자동으로 네 모서리를 인식해 배경을 잘라내고 반듯하게 펴는 웹 앱.
 필터를 골라 이미지(PNG·JPG) 또는 PDF로 저장한다. 서버 없음 — 사진은 내 기기 안에서만 처리된다.
 
-- 주소: https://kmathlove-wq.github.io/scan/
+- 주소: https://www.스캔.kro.kr/ (예비: https://kmathlove-wq.github.io/scan/)
 - 설계 문서: `docs/superpowers/specs/2026-09-07-스캔-design.md`
 
 ## 개발 상태
 
-배포됨. https://kmathlove-wq.github.io/scan/ 에서 사용.
+배포됨. https://www.스캔.kro.kr/ 에서 사용.
+카메라는 HTTPS(자물쇠)에서만 열린다 — 커스텀 도메인 SSL 인증서 발급 후 저장소
+Settings → Pages → **Enforce HTTPS** 를 켜야 한다. 그 전까지는 "사진 파일 고르기"로 사용.
 
 ## 쓰는 법
 
