@@ -1,22 +1,5 @@
 {
   "width": 1200,
   "height": 1600,
-  "corners": {
-    "topLeft": {
-      "x": 210,
-      "y": 190
-    },
-    "topRight": {
-      "x": 980,
-      "y": 250
-    },
-    "bottomRight": {
-      "x": 930,
-      "y": 1410
-    },
-    "bottomLeft": {
-      "x": 170,
-      "y": 1330
-    }
-  }
+  "corners": null
 }
