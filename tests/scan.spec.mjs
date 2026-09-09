@@ -214,6 +214,21 @@ test.describe('adjust', () => {
     await expect(page.locator('#toast')).toHaveClass(/show/);
     expect(await page.evaluate(() => window.scanDebug.state.screen)).toBe('adjust');
   });
+
+  test('기울어진(회전된) 정상 사각형은 "사각형 아님" 없이 담긴다', async ({ page }) => {
+    await toAdjust(page);
+    await page.evaluate(() => {
+      // 실제 사진처럼 크게 기울어진 볼록 사각형. orderCorners(합/차)로는 TR/BR 가
+      // 같은 점으로 뭉개져 삼각형이 됐고, 이 때문에 "사각형이 되게" 토스트가 떴다.
+      window.scanDebug._setHandles({
+        topLeft: { x: 340, y: 165 }, topRight: { x: 720, y: 40 },
+        bottomRight: { x: 1180, y: 476 }, bottomLeft: { x: 788, y: 900 },
+      });
+    });
+    await page.click('#adj-accept');
+    await page.waitForFunction(() => window.scanDebug.state.screen === 'camera', null, { timeout: 10000 });
+    expect(await page.evaluate(() => window.scanDebug.state.pages.length)).toBe(1);
+  });
 });
 
 test.describe('warp + pages', () => {
