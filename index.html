@@ -187,7 +187,9 @@ function wireEvents() {
     if (btn.disabled) return; // 처리 중 더블탭 방지
     const h = readHandles();
     if (!h) return;
-    const corners = orderCorners(Object.values(h));
+    // _orderQuad(무게중심-각도): orderCorners 의 합/차 방식은 기울어진 사각형에서
+    // 두 코너를 같은 점으로 뭉개 삼각형을 만든다(→ "사각형 아님" 오검출).
+    const corners = _orderQuad(Object.values(h));
     if (!isConvexQuad(corners)) { showToast('모서리를 사각형이 되게 다시 맞춰주세요'); return; }
     btn.disabled = true;
     try { await acceptAdjust(corners); }
