@@ -22,13 +22,15 @@
 - **전역 리스너로 화면 재구성**(`resize`→`openAdjust` 등): (1) 화면 이탈 시
   `removeEventListener` (2) 디바운스 콜백에도 `state.screen` 가드 — 둘 다 걸어야 낡은 상태
   재호출을 막는다.
-- **resize 디바운스는 사용자의 진행 중 편집을 지우면 안 된다**(I6 회귀): `resize`가
-  `openAdjust(_adjSource)`를 다시 부르면 사용자가 옮긴 핸들이 저장된 corners 로 되돌아간다
-  (폰 회전 시 보정 날아감). 해결: `_remeasureAdjRects` — 현재 핸들을 `readHandles()`로
-  SOURCE 좌표로 읽어 두고, 표시 좌표계(`_adjRects`)만 다시 잰 뒤 그 좌표를 새 화면에
-  재투영한다. 측정 코드(`_measureAdjRects`)는 openAdjust rAF 와 공유. 추가로
-  `_removeAdjResize`에서 디바운스 타이머(`clearTimeout`)까지 취소해야 — adjust 이탈 직후
-  재편집으로 곧장 들어오면 낡은 타이머가 뒤늦게 터져 핸들을 흔든다.
-- **재편집 진입 테스트**: 직전 보정 세션의 핸들 DOM 이 남아 있어 `.handle` 4개 대기만으로는
-  openAdjust rAF 완료를 못 보장한다 — `readHandles()`가 저장 코너에 수렴할 때까지 기다린
-  뒤에 `_setHandles`.
+- **resize 디바운스는 진행 중 편집을 지우면 안 된다**(I6 회귀): `resize`→`openAdjust` 재호출은
+  사용자가 옮긴 핸들을 저장 corners 로 되돌린다. 해결 `_remeasureAdjRects`: 현재 핸들을
+  `readHandles()`로 SOURCE 좌표로 떠 두고 표시 좌표계(`_adjRects`)만 다시 재 재투영.
+  `_removeAdjResize`에서 디바운스 타이머(`clearTimeout`)도 취소해야 함.
+- **재편집 진입 테스트**: 직전 세션 핸들 DOM 이 남아 `.handle` 4개 대기론 부족 —
+  `readHandles()`가 저장 코너에 수렴할 때까지 기다린 뒤 `_setHandles`.
+- **종이 감지 저대비 경로**(2026-09): `_findPaperQuad` = Canny 높음(50/160)·낮음(18/60) +
+  Otsu 3갈래, 지지도는 두 Canny 합집합(≥0.30). 낮은 임계가 "흰 종이 on 밝은 책상/마루"
+  핵심 — `paper-faint` 픽스처가 옛 코드 실패→새 코드 통과로 검증. `paper-lowcontrast.jpg`
+  (사용자 실사진: 종이 위·왼쪽 테두리가 배경과 동일 밝기)는 여전히 null 이 정상 —
+  adaptiveThreshold / 고percentile 밝기 / 라플라시안 질감마스크 다 시도했고 전부
+  fallback 상자보다 나빴으니 재시도 금지.

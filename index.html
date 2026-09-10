@@ -449,8 +449,11 @@ function _quadFromContour(ci, W, H) {
   return null;
 }
 
-// 종이 사각형을 찾는다. Otsu 이진화 + Canny 두 경로로 외곽선(RETR_EXTERNAL)을 모아
-// 큰 것부터 _quadFromContour 로 사각형을 만들고, 변에 실제 경계선이 충분히(≥0.3)
+// 종이 사각형을 찾는다. 세 갈래로 외곽선(RETR_EXTERNAL)을 모은다:
+//   ① Canny(높은 임계) — 선명한 테두리
+//   ② Canny(낮은 임계) — 흰 종이가 밝은 책상·마루 위에 있어 경계 대비가 약할 때
+//   ③ Otsu 이진화 — 어두운 배경 위 흰 종이
+// 큰 것부터 _quadFromContour 로 사각형을 만들고, 변에 실제 경계선(①∪②)이 충분히(≥0.3)
 // 있는 것 중 (경계선 지지도 + 약간의 넓이 가점) 최고점을 고른다. 없으면 null.
 // 반환값은 small 이미지 좌표계의 정렬된 네 점.
 // jscanify.findPaperContour 는 내부 `contours.get(i)` 사본을 안 지워 누수라 안 쓴다.
@@ -459,19 +462,25 @@ function _findPaperQuad(src, track) {
   if (src.channels() > 1) cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   else src.copyTo(gray);
   const g = track(new cv.Mat()); cv.GaussianBlur(gray, g, new cv.Size(5, 5), 0);
-  const W = gray.cols, H = gray.rows, imgArea = W * H;
-
-  // 경로 1: Canny + 팽창 — 저대비·질감 배경에 강함. edgeSupport 판정에도 쓴다.
-  const edges = track(new cv.Mat()); cv.Canny(g, edges, 50, 160);
+  const W = gray.cols, H = gray.rows, imgArea = W * H, mn = Math.min(W, H);
   const k3 = track(cv.Mat.ones(3, 3, cv.CV_8U));
-  cv.dilate(edges, edges, k3, new cv.Point(-1, -1), 2);
 
-  // 경로 2: Otsu 이진화 + 큰 닫힘 — 흰 종이 vs 어두운 배경 같은 고대비에 강함.
+  // ① Canny 높은 임계 — 선명한 테두리.
+  const edgesHi = track(new cv.Mat()); cv.Canny(g, edgesHi, 50, 160);
+  cv.dilate(edgesHi, edgesHi, k3, new cv.Point(-1, -1), 2);
+  // ② Canny 낮은 임계 — 흰 종이 ↔ 밝은 책상/마루처럼 경계 대비가 약할 때. 나뭇결도 더
+  //    많이 잡히지만 _quadPlausible + 지지도 판정이 걸러낸다.
+  const edgesLo = track(new cv.Mat()); cv.Canny(g, edgesLo, 18, 60);
+  cv.dilate(edgesLo, edgesLo, k3, new cv.Point(-1, -1), 2);
+  // 지지도 판정용 합친 에지맵.
+  const edges = track(new cv.Mat()); cv.bitwise_or(edgesHi, edgesLo, edges);
+
+  // ③ Otsu 이진화 + 큰 닫힘 — 흰 종이 vs 어두운 배경 같은 고대비에 강함.
   // 종이를 가로지르는 굵은 붓글씨가 흰 영역을 조각내므로, 획 폭(~이미지/22)보다 큰
   // 커널로 닫아 한 덩어리로 되살린다.
   const bin = track(new cv.Mat());
   cv.threshold(g, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-  const ks = Math.max(9, Math.round(Math.min(W, H) / 22)) | 1;
+  const ks = Math.max(9, Math.round(mn / 22)) | 1;
   const kBig = track(cv.Mat.ones(ks, ks, cv.CV_8U));
   cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kBig);
 
@@ -486,11 +495,12 @@ function _findPaperQuad(src, track) {
       else ci.delete();
     }
   };
-  collect(edges);
+  collect(edgesHi);
+  collect(edgesLo);
   collect(bin);
   items.sort((x, y) => y.a - x.a);
-  for (const it of items.slice(10)) it.ci.delete();
-  const top = items.slice(0, 10);
+  for (const it of items.slice(12)) it.ci.delete();
+  const top = items.slice(0, 12);
 
   let best = null, bestScore = 0;
   for (const it of top) {

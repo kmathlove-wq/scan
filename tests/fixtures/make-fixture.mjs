@@ -48,6 +48,25 @@ const FIXTURES = {
     ${drawPaper(corners)}
   ` },
 
+  // 저대비: 흰 종이(#eee9e0)가 밝은 나무색 책상(#e0dccc) 위, 테두리 대비 ~12단계뿐.
+  // 도움 되는 그림자 없음. 높은 임계 Canny 는 종이 윤곽을 놓치고 Otsu 는 종이+책상을 한
+  // 덩어리로 본다 — 낮은 임계 Canny 경로(감지 ②)가 있어야 잡힌다. 나뭇결(가로 줄무늬)도 살짝.
+  'paper-faint': { corners, body: `
+    ctx.fillStyle = '#e0dccc'; ctx.fillRect(0,0,${W},${H});
+    ctx.strokeStyle = 'rgba(150,142,120,0.28)'; ctx.lineWidth = 3;
+    for (let y=20; y<${H}; y+=44){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(${W}, y+9); ctx.stroke(); }
+    ${noise(22000, 0.05)}
+    ctx.fillStyle = '#eee9e0';
+    ctx.beginPath();
+    ctx.moveTo(${corners.topLeft.x}, ${corners.topLeft.y});
+    ctx.lineTo(${corners.topRight.x}, ${corners.topRight.y});
+    ctx.lineTo(${corners.bottomRight.x}, ${corners.bottomRight.y});
+    ctx.lineTo(${corners.bottomLeft.x}, ${corners.bottomLeft.y});
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#9aa0ab'; ctx.lineWidth = 5;
+    for (let y=340; y<1300; y+=76){ ctx.beginPath(); ctx.moveTo(280, y); ctx.lineTo(870 - (y*0.02), y); ctx.stroke(); }
+  ` },
+
   'paper-with-decoy': { corners, body: `
     ctx.fillStyle = '#4a4038'; ctx.fillRect(0,0,${W},${H});
     ${noise(20000, 0.05)}

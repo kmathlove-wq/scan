@@ -623,6 +623,14 @@ test.describe('감지 v4 (테두리 + Otsu, minAreaRect 대체)', () => {
     expect(r.maxErr).toBeLessThan(60);
   });
 
+  // 흰 종이가 밝은 책상 위 — 테두리 대비가 약하다. 높은 임계 Canny + Otsu 만으로는
+  // 못 잡던 것을 낮은 임계 Canny 경로(감지 ②)가 잡아낸다.
+  test('밝은 책상 위 흰 종이(저대비)도 찾는다', async ({ page }) => {
+    const r = await detect(page, 'paper-faint');
+    expect(r.got).not.toBeNull();
+    expect(r.maxErr).toBeLessThan(70);
+  });
+
   test('어려운 사진(회전+원근+봉 삐져나옴+획이 가장자리에 닿음)도 대충 잡는다', async ({ page }) => {
     const r = await detect(page, 'paper-hard');
     expect(r.got).not.toBeNull();
@@ -643,5 +651,24 @@ test.describe('감지 v4 (테두리 + Otsu, minAreaRect 대체)', () => {
     await expect(page.locator('#toast')).toHaveClass(/show/);
     await expect(page.locator('#toast')).toContainText('종이를 찾지 못했어요');
     await page.waitForFunction(() => window.scanDebug.state.screen === 'adjust', null, { timeout: 10000 });
+  });
+
+  // 사용자 제보 실사진: 밝은 마루 위 흰 종이. 종이 위/왼쪽 테두리가 배경과 밝기가 거의
+  // 같아 자동 검출이 근본적으로 어렵다. 낮은 임계 Canny 경로(②)를 더해도 이 사진은
+  // 여전히 못 잡을 수 있다 — 대신 화면을 통째로 잡는 엉터리 사각형(그러면 사용자가
+  // 손볼 여지도, 안내 문구도 사라진다)을 내놓지 않는 것이 핵심이다.
+  test('저대비 실사진: 검출돼도 화면 전체를 덮는 엉터리 사각형은 아니다', async ({ page }) => {
+    const r = await page.evaluate(async () => {
+      const bmp = await createImageBitmap(await (await fetch('/tests/fixtures/paper-lowcontrast.jpg')).blob());
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      c.getContext('2d').drawImage(bmp, 0, 0);
+      const q = window.scanDebug.detectCorners(c);
+      if (!q) return { detected: false, W: c.width, H: c.height };
+      const p = [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
+      let s = 0;
+      for (let i = 0; i < 4; i++) { const a = p[i], b = p[(i + 1) % 4]; s += a.x * b.y - b.x * a.y; }
+      return { detected: true, areaFrac: Math.abs(s) / 2 / (c.width * c.height) };
+    });
+    if (r.detected) expect(r.areaFrac).toBeLessThan(0.88);
   });
 });
